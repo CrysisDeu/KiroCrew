@@ -268,6 +268,12 @@ class NudgeLoop:
     id: str
     slot_key: str
     message: str
+    # Whether `message` is the OPERATOR's text. Gates `{{name}}` expansion at fire
+    # time, and DEFAULTS TO FALSE so the failure direction is safe: `monitor_start`
+    # reaches this through the MCP + workflow paths, so the agent can arm a loop whose
+    # message it wrote, and expanding that hands it the value of any variable it names
+    # -- a read oracle for a store `security.py` fences it out of.
+    operator_authored: bool = False
     idle_secs: int = 60
     max_cycles: int = 0  # 0 = unlimited
     cycle_count: int = 0
@@ -275,6 +281,13 @@ class NudgeLoop:
     last_fire_ts: float = 0.0
     created_ts: float = 0.0
     stop_sentinel_path: str = ""  # optional absolute path; if present loop halts
+    # The crew this loop was armed under. Recorded at arm time because it is
+    # NOT derivable at fire time: the fire paths call get_or_create without an
+    # agent, so the session's own binding governs the turn and nothing in scope
+    # names the crew. Variable expansion in the nudge body resolves against
+    # this, so without it a loop armed on a non-default crew would silently get
+    # the DEFAULT crew's values. Empty = resolve the default crew.
+    agent: str = ""
     # Wall-clock budget in seconds, measured from ``created_ts`` (0 = unlimited).
     # A cycle cap alone cannot bound COST: a loop whose turns are slow or whose
     # idle gap is long can run for days within its cycle budget. Anchoring on
@@ -583,6 +596,8 @@ class AutoNudgeService:
         max_cycles: int = 0,
         stop_sentinel_path: str = "",
         max_runtime_secs: int = 0,
+        agent: str = "",
+        operator_authored: bool = False,
     ) -> NudgeLoop:
         # CANCELLATION SAFETY: the mutate+persist runs as a SHIELDED task. If
         # the awaiting caller is cancelled mid-write, a bare await would release
@@ -604,6 +619,8 @@ class AutoNudgeService:
                 max_cycles=max_cycles,
                 stop_sentinel_path=stop_sentinel_path,
                 max_runtime_secs=max_runtime_secs,
+                agent=agent,
+                operator_authored=operator_authored,
             )
         )
         self._inflight_adds.add(inner)
@@ -625,6 +642,8 @@ class AutoNudgeService:
         max_cycles: int,
         stop_sentinel_path: str,
         max_runtime_secs: int = 0,
+        agent: str = "",
+        operator_authored: bool = False,
     ) -> NudgeLoop:
         idle_secs = max(_MIN_IDLE_SECS, min(_MAX_IDLE_SECS, int(idle_secs)))
         async with self._lock:
@@ -644,6 +663,8 @@ class AutoNudgeService:
                 created_ts=now,
                 stop_sentinel_path=stop_sentinel_path,
                 max_runtime_secs=max(0, int(max_runtime_secs)),
+                agent=agent,
+                operator_authored=operator_authored,
                 # Anchor the first deadline at arm time (set BEFORE the
                 # snapshot below so it persists): the countdown starts the
                 # moment the loop is armed, and user turns from here on only
@@ -657,9 +678,7 @@ class AutoNudgeService:
             # worker thread, and await it so a persistence failure still
             # propagates to the caller before the loop is reported armed.
             payload = self._serialize_state()
-            await asyncio.get_running_loop().run_in_executor(
-                None, self._write_state, payload
-            )
+            await asyncio.get_running_loop().run_in_executor(None, self._write_state, payload)
             self._arm_from_deadline(loop)
         self._emit("added", loop)
         logger.info("AutoNudge: added loop %s on slot %s (idle=%ds)", loop.id, slot_key, idle_secs)
@@ -689,6 +708,12 @@ class AutoNudgeService:
         loop_id: str,
         *,
         message: str | None = None,
+        # Provenance of the NEW message, when one is given. Not carried over from the
+        # loop: an operator-armed loop whose body is later rewritten through an
+        # agent-reachable path would otherwise keep expanding, on text the operator
+        # never wrote. Defaults to False, so a caller that rewrites the message
+        # without saying who wrote it gets the safe answer.
+        operator_authored: bool = False,
         idle_secs: int | None = None,
         max_cycles: int | None = None,
         active: bool | None = None,
@@ -704,6 +729,7 @@ class AutoNudgeService:
             self._update_locked(
                 loop_id,
                 message=message,
+                operator_authored=operator_authored,
                 idle_secs=idle_secs,
                 max_cycles=max_cycles,
                 active=active,
@@ -726,6 +752,12 @@ class AutoNudgeService:
         loop_id: str,
         *,
         message: str | None = None,
+        # Provenance of the NEW message, when one is given. Not carried over from the
+        # loop: an operator-armed loop whose body is later rewritten through an
+        # agent-reachable path would otherwise keep expanding, on text the operator
+        # never wrote. Defaults to False, so a caller that rewrites the message
+        # without saying who wrote it gets the safe answer.
+        operator_authored: bool = False,
         idle_secs: int | None = None,
         max_cycles: int | None = None,
         active: bool | None = None,
@@ -739,6 +771,11 @@ class AutoNudgeService:
             was_active = loop.active
             if message is not None:
                 loop.message = message
+                # Re-stamped with the NEW message, never carried over: the flag is a
+                # property of the text, and a loop armed by the operator whose body is
+                # later rewritten through an agent-reachable path must not keep
+                # expanding on text the operator never wrote.
+                loop.operator_authored = operator_authored
             interval_changed = False
             if idle_secs is not None:
                 new_idle = max(_MIN_IDLE_SECS, min(_MAX_IDLE_SECS, int(idle_secs)))
@@ -777,11 +814,7 @@ class AutoNudgeService:
                         "reasonless inactive update",
                         loop.id,
                     )
-                elif (
-                    stopped_reason in _TERMINAL_BOUND_REASONS
-                    and not active
-                    and not loop.active
-                ):
+                elif stopped_reason in _TERMINAL_BOUND_REASONS and not active and not loop.active:
                     logger.info(
                         "AutoNudge: loop %s already deactivated (%s) — %s bound "
                         "not overwriting it",
