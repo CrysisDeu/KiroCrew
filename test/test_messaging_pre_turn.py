@@ -232,12 +232,13 @@ class TestPreTurnRatchet:
         """
         from kiro_crew.channels import builtin_channel_descriptors
 
-        # weixin and wecom are exempt for the same reason as the big four:
-        # their handle_message runs extra pre-turn steps with their own busy
-        # checks (wecom additionally clears attachments there and ingests
-        # media before rotating), so folding them into the helper is a
-        # behaviour change that needs its own review, not a rider here.
-        exempt = {"telegram", "discord", "teams", "slack", "weixin", "wecom"}
+        # weixin, wecom, and whatsapp are exempt for the same reason as the big
+        # four: their dispatchers run channel-specific pre-turn paths around
+        # their own busy checks. WhatsApp additionally derives an operator-aware
+        # session key and passes the inbound message to its busy handler. Folding
+        # them into the helper is a behaviour change that needs its own review,
+        # not a rider here.
+        exempt = {"telegram", "discord", "teams", "slack", "weixin", "wecom", "whatsapp"}
         rostered = {d.channel_type for d in builtin_channel_descriptors()}
         unaccounted = rostered - set(_PRE_TURN_CHANNELS) - exempt
         assert not unaccounted, (
