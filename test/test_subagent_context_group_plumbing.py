@@ -27,6 +27,7 @@ from kiro_crew.subagent import (
     _context_groups_of,
 )
 from kiro_crew.subagent_persistence import create_agent_folder, read_state
+from kiro_crew.subagent_scheduler import AdmissionDecision
 
 
 def _mock_sessions() -> MagicMock:
@@ -89,7 +90,9 @@ class TestQueueRoundTrip:
     def test_queue_entry_carries_flags(self):
         mgr = _mgr()
         # Force the stagger gate so the spawn queues instead of starting.
-        mgr._should_stagger_queue = MagicMock(return_value=(True, False))  # type: ignore[method-assign]
+        mgr._scheduler.admission = MagicMock(  # type: ignore[method-assign]
+            return_value=AdmissionDecision(True, False, 0.0)
+        )
         info = mgr.spawn("summarize this log", include_memory=False)
         assert info is not None and info.queued is True
         assert len(mgr._queue) == 1
@@ -101,7 +104,9 @@ class TestQueueRoundTrip:
     def test_queued_placeholder_reports_the_scope(self):
         """spawn_list shows queued members too, so the record must carry it."""
         mgr = _mgr()
-        mgr._should_stagger_queue = MagicMock(return_value=(True, False))  # type: ignore[method-assign]
+        mgr._scheduler.admission = MagicMock(  # type: ignore[method-assign]
+            return_value=AdmissionDecision(True, False, 0.0)
+        )
         info = mgr.spawn("summarize this log", include_lessons=False)
         assert info is not None
         assert info.include_lessons is False
@@ -109,7 +114,9 @@ class TestQueueRoundTrip:
     def test_drained_spawn_receives_the_flags(self):
         """The drain forwards the FULL kwarg set, flags included."""
         mgr = _mgr()
-        mgr._should_stagger_queue = MagicMock(return_value=(True, False))  # type: ignore[method-assign]
+        mgr._scheduler.admission = MagicMock(  # type: ignore[method-assign]
+            return_value=AdmissionDecision(True, False, 0.0)
+        )
         mgr.spawn("validate this finding", include_memory=False, include_project=False)
         captured: dict[str, object] = {}
 
@@ -120,6 +127,7 @@ class TestQueueRoundTrip:
         mgr._max_concurrent = 4
         mgr._running_count = 0
         mgr._spawn_stagger_secs = 0.0
+        mgr._scheduler.admission.return_value = AdmissionDecision(False, True, 0.0)
         mgr._drain_queue()
         assert captured["include_memory"] is False
         assert captured["include_lessons"] is True
