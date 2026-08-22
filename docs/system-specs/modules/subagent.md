@@ -55,8 +55,15 @@ executor's run lease.
 Rejected legacy admission is durably reflected as a rejected command and failed
 terminal run. A claimed execution with an uncertain crash is not automatically
 replayed. Accepted keyed runs carry `_coordinator_admitted`, preventing `_run`
-from creating a second shadow command. Legacy synchronous spawns still submit at
-async `_run` entry with bounded, failure-contained behavior during migration.
+from creating a second shadow command. Legacy synchronous spawns submit and
+claim their stable shadow command at async `_run` entry. Submission diagnostics
+remain bounded and failure-contained, but execution fails closed before entering
+the child session when no run fence was acquired.
+If the bounded claim wait expires, the manager resolves the stable command key
+once. An owned, unexpired committed claim continues with its reconstructed run
+fence; an ambiguous result emits no local terminal callback and is left to
+fenced durable recovery. This prevents a late SQLite commit from producing both
+an immediate unfenced failure and a later recovered interruption.
 Queued and approval-waiting keyed runs retain a bounded pre-execution lease.
 Their commands remain `CLAIMED` until the manager task actually starts, so a
 gateway restart cannot turn volatile queued work into a durable applied result.
@@ -122,7 +129,7 @@ the coordinator port. The winning terminal reporter commits the outcome and
 outbox row before any WebSocket or parent callback. It keeps its execution
 lease and shielded report alive across transient commit failures, then retries
 the exact outbox event until delivery succeeds or the destination durably
-defers it to its queue/digest.
+defers it to its queue/digest or releases it for the periodic outbox drainer.
 
 Private manager views for the old counter, queue, report-task, and teardown-gate
 fields remain as compatibility adapters. They delegate to these boundaries and
@@ -134,13 +141,15 @@ must not regain independent state.
 connections and offloads every filesystem/database operation from the event
 loop onto a dedicated two-worker coordinator pool. Lock waits therefore queue
 among coordinator calls and cannot starve asyncio's shared executor after a
-bounded caller wait ends. Mutations run under `BEGIN IMMEDIATE`; schema v3 uses
-`runs`, `commands`,
-`outbox`, and `metadata`, with WAL, `synchronous=FULL`, foreign keys, a bounded
+bounded caller wait ends. Mutations run under `BEGIN IMMEDIATE`; schema v4 uses
+`runs`, `commands`, `outbox`, and `metadata`, with WAL, `synchronous=FULL`,
+foreign keys, a bounded
 busy timeout, and a quick integrity check. Ordered, contiguous migrations are
 applied in that transaction; v2 adds the durable command payload to the v1 base
 schema and v3 adds independent command claims/results while permitting
-pre-cutover control targets. Failed upgrades roll back cleanly for idempotent
+pre-cutover control targets. Schema v4 records the source version for imported
+legacy runs. Schema v5 records fenced child-process identity and ownership in
+the protected coordinator store. Failed upgrades roll back cleanly for idempotent
 retry. The implementation
 hydrates the typed in-memory state machine from those rows and rewrites the
 typed rows in the same transaction. This deliberately favors one behavioral
@@ -160,9 +169,26 @@ preflight; a surviving sidecar or primary-database ACL failure remains fatal.
 It always returns the primary result. It calls the shadow
 only after primary completion, swallows shadow failures, compares normalized
 stable field classes without logging payload values, and never repairs the
-primary. Keyed execution lifecycle and terminal delivery now use the durable
-coordinator directly; legacy unkeyed runs retain their file-backed report path
-until the restart importer lands.
+primary. Keyed execution lifecycle, terminal delivery, and restart recovery use
+the durable coordinator directly. Legacy unkeyed folders are imported read-only
+and keep their file-backed result path as a compatibility mirror. Recovery
+excludes runs with a live manager task and preassigned runs still in the local
+spawn queue; retained terminal manager records remain eligible to repair a
+failed terminal commit or delivery. A pending keyed authority submission stays
+reserved for safe command replay, while an unkeyed manager shadow row carries
+an explicit legacy-shadow source marker and becomes eligible for recovery after
+a one-sweep grace period. The grace prevents a recovery snapshot from claiming
+a shadow row created concurrently by a newly started manager task while still
+converging stale pre-restart rows. The live gateway owner claims new unkeyed
+shadow rows and transitions them through the same starting/running fence as
+keyed runs, so protected process identity is available before any prompt. For a
+process write that committed after its await was cancelled, the same execution
+fence may resynchronize exactly one stale lifecycle version: an identical write
+is unchanged, while the one-shot fresh-session recovery may replace the process
+identity. Other version conflicts remain rejected. For a coordinator-persisted
+child process, recovery verifies the recorded start identity
+and uses the pinned process-tree kill; a lost identity or failed termination
+leaves the run non-terminal for a later safe retry.
 
 ### Transactional completion outbox
 
@@ -212,14 +238,32 @@ identity: digest progress is volatile, so recovered events route independently
 instead of synthesizing misleading one-member wave completions.
 
 After the dashboard or headless API destination registry is initialized,
-startup reconciliation drains every currently eligible bounded batch of
-coordinator completions before scanning legacy folders, including when no
-legacy orphan exists. Starting the reaper earlier could misroute and acknowledge
-a dashboard completion before its slot exists. The periodic reaper retries the
-same drain so transient startup delivery failures remain recoverable without
-another process restart.
-Manager shutdown cancels and gathers the one-shot reconciliation task before
-tearing down live agents.
+startup coordinator reconciliation imports legacy folders, recovers expired
+runs, and drains every currently eligible bounded batch of pending completions,
+even when no legacy orphan exists. If the protected coordinator store cannot be
+opened or migrated, startup recovery logs the failure and fails closed; it does
+not signal a process selected from mutable legacy folder metadata. Malformed,
+non-finite, oversized, or excessively nested legacy JSON is quarantined per
+folder so one agent-written record cannot prevent healthy siblings from import.
+Reads use the shared descriptor-pinned regular-file helper with a 1 MiB ceiling;
+links, devices, hardlinks, and paths escaping the legacy root fail closed.
+Within one live gateway, a legacy run whose coordinator submission or command
+claim times out delegates terminal ownership to durable recovery because the
+bounded await can expire after SQLite has accepted the work. An uncertain batch
+member remains outstanding for wave accounting until recovery supplies its
+terminal event. The recovered event inherits the live batch identity before it
+replaces that member, so a sibling cannot close a partial digest and strand the
+recovered result outside the wave.
+The timed submit stays shielded and strongly referenced until its
+bounded-executor operation settles, ensuring a queued write can still create
+the durable recovery record instead of being cancelled with no owner. If that
+settlement proves the write failed or produced no durable run, the uncertainty
+guard is cleared and the existing one-shot legacy terminal reporter resumes;
+durable recovery remains the sole terminal owner only after a committed write.
+Starting the reaper earlier could misroute and acknowledge a dashboard
+completion before its slot exists. The periodic reaper repeats the full fenced
+recovery and delivery sweep, while manager shutdown cancels and gathers the
+one-shot reconciliation task before tearing down live agents.
 
 Coordinator-backed injected envelopes include `Event: <event_id>` and
 `meta.subagentCompletion.eventId`. Wave digests carry one `Event:` line for each
@@ -697,13 +741,63 @@ Folder-per-agent persistence at `~/.kiro/crew/subagents/{id}/`:
 
 ### Gateway Restart Reconciliation
 
-On startup, `SubagentManager` scans `~/.kiro/crew/subagents/` and reconciles:
+Startup is coordinator-first:
 
-1. **PID alive** → kill process group, deliver result if available, tombstone if not
-2. **PID dead + result.txt exists** → deliver result to parent session
-3. **PID dead + no result** → write tombstone with "orphaned" error
+1. `LegacyRunImporter` reads known fields from legacy folders and creates only
+   missing coordinator rows. For an existing nonterminal row it may retain a
+   previously empty `result.txt` path, but agent-writable state and tombstone
+   files never overwrite an existing coordinator row's lifecycle state,
+   outcome, error, ownership, or version; fenced recovery is the only terminal
+   authority for native rows. Legacy `pid`, `pid_start_id`, and
+   `process_owned` fields are never imported and never authorize a signal. The
+   importer never rewrites or deletes `state.json`, `result.txt`, or
+   `tombstone.json`; corrupt/mismatched folders and records with non-finite or
+   out-of-range timestamps are diagnosed and skipped without blocking sibling
+   imports.
+   Legacy parent/destination fields are also agent-writable, so tombstones
+   import as terminal history without creating outbox work; only
+   coordinator-authenticated destinations can authorize a pending injection.
+   New imported rows record `source_version="legacy-state-v1"`.
+2. `RunRecovery` claims only nonterminal runs whose execution lease is absent or
+   expired and whose execution command is no longer pending, except for a stale
+   legacy-shadow row after its grace period. A durable keyed submission that has
+   not yet been claimed remains eligible for normal execution after restart. A
+   recovery claim increments the run epoch, so a
+   pre-restart owner cannot commit after takeover. Runs with a live manager task
+   and locally queued run IDs are excluded from periodic reconciliation; a
+   retained completed record without a live task is not.
+3. A recorded child is killed only when the active fenced executor persisted
+   its identity in the owner-only coordinator database, the child is live, and
+   its `process_start_id` exactly matches
+   `platform_compat.process_start_time(process_id)`. Dedicated executions
+   persist this opaque identity beside the PID before the child receives a
+   prompt; a protected coordinator write failure aborts execution, while the
+   legacy `state.json` mirror remains best-effort. Shared
+   sessions persist the runtime PID for attribution but mark it non-owned and
+   never persist a kill-authorizing start identity, because that process also
+   hosts the parent and other sessions. A live owned child with an unreadable,
+   missing, or mismatched identity leaves the run nonterminal and is never
+   signalled; recovery retries after the lease expires. Default recovery
+   termination is likewise deferred on POSIX because its process-tree signal
+   cannot keep the verified identity pinned across the signal; Windows keeps an
+   identity-pinned process handle through termination. Recovery writes an
+   `orphan_reconcile_kill` SEL authorization synchronously and off the event
+   loop before signalling the process; the critical write must be durable
+   before termination, and an audit failure leaves the child and run untouched
+   for a later retry.
+4. The claimed run becomes `interrupted`; any partial `result.txt` path is
+   retained. Outbox rehydration preserves that explicit fourth outcome even
+   though the explanatory error is non-empty, and the parent announcement
+   points at the retained partial result instead of rendering an ordinary
+   failure. Recovery never claims or replays its execution command.
+5. Coordinator-authenticated terminal pending outbox events drain independently
+   through the same fenced delivery adapter. Legacy tombstones create no outbox
+   event and therefore cannot route a completion from their untrusted metadata.
 
-**Orphan delivery is wired** (not a stub): the gateway registers `on_orphan_notify` (session injection — rides the parent slot's batched pending-failures drain) and `on_orphan_dm` (fallback). The DM fallback collects every undelivered orphan across the reconciliation scan and sends ONE digest message (`"N subagent(s)…"`) — never N pings; a lone orphan keeps the plain per-agent message.
+The periodic reaper repeats expired-lease reconciliation and delivery drain, so
+a lease that is still valid at process startup converges after expiry. A
+coordinator-open or migration failure is fail-closed: folder-based PID metadata
+does not authorize orphan termination or completion delivery.
 
 ### Tombstone Lifecycle
 
@@ -811,7 +905,9 @@ Decision + lifecycle:
   `_get_parent_runtime()` (falling back to `SessionManager.get_subagent_runtime()`
   — a companion runtime), calls `runtime.create_session()`, and wraps the handle
   in `AcpSessionProvider`. `SubagentInfo._session_sharing` / `_shared_provider`
-  record the shared path.
+  record the shared path. Its PID may be persisted for attribution, but it is
+  explicitly non-owned and carries no process-start identity, so restart
+  recovery can never signal the parent runtime on behalf of a subagent run.
 - On any failure the code falls back transparently to the legacy
   per-process path (`get_or_create`).
 - Cleanup (`_run` finally + `_force_reap`) calls `_shared_provider.shutdown()` to
