@@ -810,7 +810,13 @@ interface ChatState {
   // Ephemeral like `followups`: frontend-only, dropped by a reload. The backend
   // offers at most one card per slot for the lifetime of that slot, so a
   // dismissed or lost card is never re-offered.
-  folderSuggestions: Record<string, { folderId: string; folderName: string; breadcrumb: string; ts: number }>
+  //
+  // `turns` counts the user sends that have happened since the card arrived, so
+  // an unanswered card ages out instead of sitting above the composer for the
+  // rest of the session (see FOLDER_SUGGESTION_MAX_TURNS). Ignoring a suggestion
+  // IS an answer — the user who keeps typing has declined by conduct — and the
+  // backend needs no telling because it never re-offers this slot anyway.
+  folderSuggestions: Record<string, { folderId: string; folderName: string; breadcrumb: string; ts: number; turns: number }>
   // Slot with a locally-started turn awaiting server confirmation. While set,
   // the slots-sync ignores a server running=false for it (the snapshot may
   // predate the send). Cleared on server confirmation or turn end.
@@ -818,6 +824,23 @@ interface ChatState {
 }
 
 const MAX_RETIRED_QUEUE_IDS = 50
+
+/** User sends a folder-suggestion card survives before it ages out on its own.
+ *
+ *  The card is an offer, not a task: a user who keeps typing past it has already
+ *  answered by conduct, and a permanent card in the composer band is a standing
+ *  cost paid by every session the model guessed wrong about. Three is the count
+ *  where the offer is still plausibly in view (the user may be mid-thought when
+ *  it lands, so one turn is too eager) without becoming furniture.
+ *
+ *  Counted by an explicit `ageFolderSuggestion` dispatch from the ONE surface
+ *  that renders the card (ChatPage's composer band, active slot), and only
+ *  after the server confirmed the send was delivered. So: a failed send never
+ *  counts (delivery unconfirmed), a send from a surface that does not show the
+ *  card (ChatPane companion/embed panes, Slack, cron) never counts (nothing
+ *  rendered, nothing dispatched), and a replacement card that landed while the
+ *  send was in flight is not aged (ts-pinned to the generation the user saw). */
+export const FOLDER_SUGGESTION_MAX_TURNS = 3
 
 const initialState: ChatState = {
   activeSlot: null,
@@ -2314,7 +2337,7 @@ const chatSlice = createSlice({
       // Defensive: a partial preloaded slice (tests, older persisted state) can
       // arrive without this key.
       if (!state.folderSuggestions) state.folderSuggestions = {}
-      state.folderSuggestions[slot] = { folderId, folderName, breadcrumb, ts: ts ?? Date.now() / 1000 }
+      state.folderSuggestions[slot] = { folderId, folderName, breadcrumb, ts: ts ?? Date.now() / 1000, turns: 0 }
     },
     // Both answers land here — accepting the move and declining it clear the same
     // way, because the backend keeps no state to resolve and offers at most one
@@ -2490,6 +2513,33 @@ const chatSlice = createSlice({
         return false
       }
       if (!confirm(state.messages)) confirm(state.slotMessages[safeKey(slot)])
+    },
+    /** Age the slot's folder-suggestion card by one delivered user send, and
+     *  drop it once it has had its run (> FOLDER_SUGGESTION_MAX_TURNS).
+     *
+     *  Deliberately its OWN action, dispatched ONLY by the render site that
+     *  showed the card (ChatPage's composer band, active slot) after the server
+     *  confirmed the send was delivered — never baked into a shared send
+     *  reducer. The two review rounds that shaped this: counting the optimistic
+     *  `startLocalTurn` let FAILED sends burn the one-shot offer, and counting
+     *  `confirmOptimisticSend` let surfaces that confirm sends WITHOUT rendering
+     *  the card (ChatPane in artifact companion chats, sidebar panes, settings
+     *  embeds) expire a card the user never saw. Tying aging to an explicit
+     *  dispatch from the renderer makes every "send from a surface that does not
+     *  show the card" variant unreachable by construction.
+     *
+     *  `ts` guards the in-flight-replacement race the way `clearFolderSuggestion`
+     *  does: the POST that earns this dispatch was sent while ONE card
+     *  generation was visible, and a replacement arriving before the response
+     *  must not inherit its age. */
+    ageFolderSuggestion(state, action: PayloadAction<{ slot: string; ts?: number }>) {
+      const { slot, ts } = action.payload
+      if (isUnsafeKey(slot)) return
+      const suggestion = state.folderSuggestions?.[slot]
+      if (!suggestion) return
+      if (ts != null && suggestion.ts !== ts) return
+      suggestion.turns = (suggestion.turns ?? 0) + 1
+      if (suggestion.turns > FOLDER_SUGGESTION_MAX_TURNS) delete state.folderSuggestions[slot]
     },
     removeByApprovalId(state, action: PayloadAction<string>) { state.messages = state.messages.filter(m => m.meta?.approval_id !== action.payload) },
     resolveByApprovalId(state, action: PayloadAction<{ id: string; decision?: string }>) {
@@ -4298,7 +4348,7 @@ const chatSlice = createSlice({
 })
 
 export const {
-  setActiveSlot, clearSlotState, setPendingInput, setAgentSwitchNotice, setQuestionCard, retireStatelessQuestion, clearQuestionCard, setQuestionDraft, resolveQuestionCard, setFollowupCard, clearFollowupCard, dismissFollowupItem, setFolderSuggestion, clearFolderSuggestion, appendMessage, appendSlotMessage, updateStreamingMessage, finalizeAssistant,
+  setActiveSlot, clearSlotState, setPendingInput, setAgentSwitchNotice, setQuestionCard, retireStatelessQuestion, clearQuestionCard, setQuestionDraft, resolveQuestionCard, setFollowupCard, clearFollowupCard, dismissFollowupItem, setFolderSuggestion, clearFolderSuggestion, ageFolderSuggestion, appendMessage, appendSlotMessage, updateStreamingMessage, finalizeAssistant,
   removeThinking, confirmOptimisticSend, removeByApprovalId, resolveByApprovalId, clearPendingPermissions, setSlotRunning, setSlotStopping, startLocalTurn, syncSlotRunningFromServer, setSlotState, setSlotStatusDetail, setStopPressedAt, clearMessages, truncateAfterIndex, replaceMessages, hydrateSlotMessages, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage, reorderQueuedMessages,
   sseContextUsage, setVoicePlaying, setVoiceAudio,
   toggleActivity, openActivityToTab, openActivityPanel, openActivityToTool, clearFocusToolCallId, requestSlotReveal, clearSlotReveal, clearSubagentsForSnapshot, sseSubagentPending, markSubagentApproving, sseSubagentSpawn, sseSubagentChunk, sseSubagentTool, sseSubagentStalled, sseSubagentRetrying, sseSubagentDone, sseSubagentQueued,

@@ -29,7 +29,7 @@ import {
   toggleActivity, openActivityPanel, openActivityToTab,
   selectSubagent,
   setActiveSlot, truncateAfterIndex, replaceMessages,
-  requestStop, pendingQuestionFor, captureStatelessCard, clearFollowupCard, dismissFollowupItem, clearFolderSuggestion,
+  requestStop, pendingQuestionFor, captureStatelessCard, clearFollowupCard, dismissFollowupItem, clearFolderSuggestion, ageFolderSuggestion,
   retireStatelessQuestion, capturePendingAskId, confirmOptimisticSend,
   requestSlotReveal,
   mcpAppKey,
@@ -3951,6 +3951,15 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // Same entry-time capture for a BLOCKING card, whose staleness is resolved
     // over the network instead of in the store.
     const askAtSend = capturePendingAskId(store.getState().chat.pendingQuestions, entrySendSlot)
+    // Entry-time capture of the folder-suggestion card, ONLY when it was
+    // actually on screen for this send: the card renders solely in this page's
+    // composer band for the ACTIVE slot, so a targeted send into another slot —
+    // and any send from a surface that never renders the card (ChatPane) — must
+    // not age it. The captured `ts` pins the card GENERATION the user saw; the
+    // aging dispatch below is ts-guarded so a replacement card arriving while
+    // the POST is in flight does not inherit this send's age.
+    const folderCardAtSend =
+      entrySendSlot && entrySendSlot === uiSlot ? store.getState().chat.folderSuggestions?.[entrySendSlot] : undefined
 
     // Slash command interception (e.g. /side): runs before knowledge so a
     // bare prefix like /side returns immediately without touching input parse.
@@ -4389,6 +4398,16 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
         // unconfirmed — a wrongly kept card is dismissible, a wrongly deleted
         // one is not recoverable).
         dispatch(retireStatelessQuestion({ slot, expected: cardAtSend }))
+      }
+      if (body.ok && !body.queued && folderCardAtSend && slot === entrySendSlot) {
+        // Same delivery bar and slot-identity guard as the stateless-card
+        // retirement above, for the folder-suggestion card's turn-aging: the
+        // card was on screen when the user hit send (captured at entry, active
+        // slot only) and the server confirmed the send was delivered. Failed
+        // sends never reach here; queued sends are still cancellable; forceNew
+        // reroutes answer nothing in the entry slot. ts pins the card
+        // generation, so a replacement that landed mid-flight is not aged.
+        dispatch(ageFolderSuggestion({ slot, ts: folderCardAtSend.ts }))
       }
       // The user answered in the composer instead of the card; a blocking card
       // is resolved over the network, so this cannot be a store-only retirement.
