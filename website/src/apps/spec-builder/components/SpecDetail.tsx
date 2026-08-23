@@ -5,14 +5,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Maximize2, Minimize2, Play, Pause, MessageSquare, X } from 'lucide-react'
+import { Maximize2, Minimize2, Play, Pause, MessageSquare, Trash2, X } from 'lucide-react'
 import { ADVANCE_PROMPT } from '../prompts'
 import { specApi, LS, phaseLabel, PHASE_BUILDING_KEY, type SpecDetail as SpecDetailData } from '../api'
 import { ACCENT, SEL_BG, SEL_BORDER, PULSE_MOTION, Btn } from './shared'
 import SegmentedControl, { type Segment } from '../../../components/SegmentedControl'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import ChatColumn from './ChatColumn'
-import DocView from './DocView'
+import DocView, { type Selection as DocSelection } from './DocView'
 import { DOC_CSS } from '../inlineStyles'
 import {
   REVIEW_FEEDBACK_HEADER,
@@ -21,6 +21,7 @@ import {
 } from '../prompts'
 import SpecStatePanel from './SpecStatePanel'
 import { ChatColumnSkeleton } from './Shimmer'
+import Modal from '../../../components/Modal'
 
 import { i18nT } from '../../../i18n/t'
 export interface ReviewComment {
@@ -65,11 +66,23 @@ const ADVANCE: Record<string, { labelKey: string; pendingKey: string; target: Do
 export interface SpecDetailProps {
   name: string
   setErr: (msg: string) => void
+  /** Called after a successful delete so the workspace can drop the selection. */
+  onDeleted?: () => void
 }
 
-export default function SpecDetail({ name, setErr }: SpecDetailProps) {
+export default function SpecDetail({ name, setErr, onDeleted }: SpecDetailProps) {
   const [tab, setTab] = useState<DocTabId>('requirements')
   const [expanded, setExpanded] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  // Comment composer lives here so the column ↔ overlay remount of DocView
+  // does not drop a half-typed note. SpecDetail itself remounts on spec change
+  // (`key={sel}` in Workspace), which clears it.
+  const [docSel, setDocSel] = useState<DocSelection | null>(null)
+  const [docNote, setDocNote] = useState<DocSelection | null>(null)
+  const [docDraft, setDocDraft] = useState('')
+  const docComposer = {
+    sel: docSel, setSel: setDocSel, note: docNote, setNote: setDocNote, draft: docDraft, setDraft: setDocDraft,
+  }
   // Narrow: the document column steps aside and the chat takes the full width.
   // The document is still reachable — the same fullscreen review overlay, opened
   // from the chat header instead of from the hidden column's own header.
@@ -119,8 +132,12 @@ export default function SpecDetail({ name, setErr }: SpecDetailProps) {
     try { const v = Number(localStorage.getItem(LS.docPct)); return v >= 25 && v <= 75 ? v : 44 } catch { return 44 }
   })
   const setDocPct = (v: number) => { setDocPctRaw(v); try { localStorage.setItem(LS.docPct, String(v)) } catch { /* ignore */ } }
+  // Held so an unmount mid-drag can drop the window listeners and restore the
+  // cursor; without this the next pointer move would keep resizing a gone pane.
+  const stopDividerDrag = useRef<(() => void) | null>(null)
   const onDividerDown = (e: React.MouseEvent) => {
     e.preventDefault()
+    stopDividerDrag.current?.()
     const onMove = (ev: MouseEvent) => {
       if (!bodyRef.current) return
       const r = bodyRef.current.getBoundingClientRect()
@@ -131,7 +148,9 @@ export default function SpecDetail({ name, setErr }: SpecDetailProps) {
       window.removeEventListener('mouseup', onUp)
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
+      stopDividerDrag.current = null
     }
+    stopDividerDrag.current = onUp
     document.body.style.cursor = 'col-resize'
     // Lock text selection for the duration of the drag — without this, moving
     // the pointer over the document selects prose (and can raise the
@@ -140,6 +159,7 @@ export default function SpecDetail({ name, setErr }: SpecDetailProps) {
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
   }
+  useEffect(() => () => { stopDividerDrag.current?.() }, [])
   // Keyboard resize — the divider must be operable without a pointer.
   const onDividerKey = (e: React.KeyboardEvent) => {
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
@@ -147,12 +167,26 @@ export default function SpecDetail({ name, setErr }: SpecDetailProps) {
     setDocPct(Math.min(75, Math.max(25, docPct + (e.key === 'ArrowLeft' ? 4 : -4))))
   }
 
-  // Esc closes the fullscreen review overlay.
+  // Esc closes the fullscreen review overlay. Suppressed while the delete
+  // confirm is up so the stacked dialog gets the key first (Modal already
+  // skips an Escape that was preventDefault'd).
   useEffect(() => {
-    if (!expanded) return
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setExpanded(false) }
+    if (!expanded || confirmDelete) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      setExpanded(false)
+    }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
+  }, [expanded, confirmDelete])
+
+  // Focus the overlay once when it opens. An inline callback ref would re-run
+  // on every poll (the function identity changes, so React calls it with the
+  // element again) and yank focus out of the comment composer.
+  const overlayRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (expanded) overlayRef.current?.focus()
   }, [expanded])
 
   const hasTasks = !!detail?.files?.['tasks.md']
@@ -177,6 +211,19 @@ export default function SpecDetail({ name, setErr }: SpecDetailProps) {
     onError: (e) => setErr((e as Error).message),
     onSettled: invalidate,
   })
+  // Delete must NOT refetch this spec: the entry is gone, and a 404 here would
+  // paint an error banner over a successful removal. Drop the detail cache and
+  // refresh the list; the workspace clears the selection via onDeleted.
+  const deleteMutation = useMutation({
+    mutationFn: () => specApi.remove(name, specId()),
+    onError: (e) => setErr((e as Error).message),
+    onSuccess: () => {
+      setConfirmDelete(false)
+      void queryClient.removeQueries({ queryKey: ['spec-builder', 'spec', name] })
+      void queryClient.invalidateQueries({ queryKey: ['spec-builder', 'specs'] })
+      onDeleted?.()
+    },
+  })
   // ONE mutation for every message this view sends (phase approval, review
   // feedback, decision answers). Direct specApi.message calls refetched only the
   // detail, so updated_at changed without the specs list knowing and the rail's
@@ -187,6 +234,15 @@ export default function SpecDetail({ name, setErr }: SpecDetailProps) {
     onError: (e) => setErr((e as Error).message),
     onSettled: invalidate,
   })
+  // mutateAsync is stable across renders; the mutation object is not.
+  const sendChat = useCallback(
+    (msg: string) => messageMutation.mutateAsync(msg),
+    [messageMutation.mutateAsync],
+  )
+
+  // A selection pill's x/y were measured in the column pane. Expanding remounts
+  // DocView in the overlay, so those coordinates would float over empty space.
+  useEffect(() => { setDocSel(null) }, [expanded])
 
   // Whether the instruction currently in flight is THIS view's phase approval.
   // messageMutation is shared with the decision tray and the review-comment
@@ -272,6 +328,57 @@ export default function SpecDetail({ name, setErr }: SpecDetailProps) {
     return { key: t.id, label: i18nT(t.labelKey), icon: dot, tooltip: fname + ' — ' + status }
   })
 
+  // Shared by the docs-column header and the fullscreen review overlay. The
+  // overlay used to omit these, so expanding to read a document hid the only
+  // way to approve, build, or pause it.
+  const phaseActions = () => (
+    <>
+      {!executing && detail?.phase && ADVANCE[detail.phase] && (
+        (() => {
+          const a = ADVANCE[detail.phase]
+          const waiting = approved === detail.phase
+          return (
+            <Btn
+              label={advancing
+                ? i18nT('apps.specBuilder.components.specDetail.sending')
+                : waiting
+                  ? i18nT(a.pendingKey)
+                  : <><Play className="lucide-inline" /> {i18nT(a.labelKey)}</>}
+              primary={!waiting}
+              disabled={advancing || messageMutation.isPending || waiting}
+              title={waiting
+                ? i18nT('apps.specBuilder.components.specDetail.the_agent_is_writing_the_next_document')
+                : i18nT('apps.specBuilder.components.specDetail.tells_the_agent_this_phase_is_approved_and_to_mo')}
+              onClick={() => { void advance() }}
+            />
+          )
+        })()
+      )}
+      {executing
+        ? (
+          <Btn
+            label={<><Pause className="lucide-inline" /> {stopMutation.isPending ? i18nT('apps.specBuilder.components.specDetail.pausing') : i18nT('apps.specBuilder.components.specDetail.pause')}</>}
+            danger
+            disabled={stopMutation.isPending}
+            onClick={stop}
+          />
+        )
+        : hasTasks && (
+          // Disabled while the handoff is in flight. Two clicks queued TWO
+          // handoffs, and Pause halts the running turn while leaving the queued
+          // one intact -- so execution resumed by itself and kept editing files
+          // after the user had stopped it.
+          <Btn
+            label={<><Play className="lucide-inline" /> {executeMutation.isPending ? i18nT('apps.specBuilder.components.specDetail.starting') : i18nT('apps.specBuilder.components.specDetail.start_building')}</>}
+            primary
+            disabled={executeMutation.isPending}
+            title={i18nT('apps.specBuilder.components.specDetail.an_agent_will_work_through_the_task_list')}
+            onClick={execute}
+          />
+        )}
+    </>
+  )
+
   // Doc column header: shared segmented tabs + expand + phase-gated actions.
   // On a desktop this matches the chat column header's height and bottom border
   // so the two line up. While narrow the columns are STACKED, so that alignment
@@ -295,50 +402,10 @@ export default function SpecDetail({ name, setErr }: SpecDetailProps) {
         ariaLabel={fullscreen ? i18nT('apps.specBuilder.components.specDetail.close_review_view') : i18nT('apps.specBuilder.components.specDetail.expand_document_for_review')}
         label={fullscreen ? <Minimize2 className="lucide-inline" /> : <Maximize2 className="lucide-inline" />}
       />
-      {!fullscreen && !executing && detail?.phase && ADVANCE[detail.phase] && (
-        (() => {
-          const a = ADVANCE[detail.phase]
-          const waiting = approved === detail.phase
-          return (
-            <Btn
-              label={advancing
-                ? i18nT('apps.specBuilder.components.specDetail.sending')
-                : waiting
-                  ? i18nT(a.pendingKey)
-                  : <><Play className="lucide-inline" /> {i18nT(a.labelKey)}</>}
-              primary={!waiting}
-              disabled={advancing || messageMutation.isPending || waiting}
-              title={waiting
-                ? i18nT('apps.specBuilder.components.specDetail.the_agent_is_writing_the_next_document')
-                : i18nT('apps.specBuilder.components.specDetail.tells_the_agent_this_phase_is_approved_and_to_mo')}
-              onClick={() => { void advance() }}
-            />
-          )
-        })()
-      )}
-      {!fullscreen && (executing
-        ? (
-          <Btn
-            label={<><Pause className="lucide-inline" /> {stopMutation.isPending ? i18nT('apps.specBuilder.components.specDetail.pausing') : i18nT('apps.specBuilder.components.specDetail.pause')}</>}
-            danger
-            disabled={stopMutation.isPending}
-            onClick={stop}
-          />
-        )
-        : hasTasks && (
-          // Disabled while the handoff is in flight. Two clicks queued TWO
-          // handoffs, and Pause halts the running turn while leaving the queued
-          // one intact -- so execution resumed by itself and kept editing files
-          // after the user had stopped it.
-          <Btn
-            label={<><Play className="lucide-inline" /> {executeMutation.isPending ? i18nT('apps.specBuilder.components.specDetail.starting') : i18nT('apps.specBuilder.components.specDetail.start_building')}</>}
-            primary
-            disabled={executeMutation.isPending}
-            title={i18nT('apps.specBuilder.components.specDetail.an_agent_will_work_through_the_task_list')}
-            onClick={execute}
-          />
-        )
-      )}
+      {/* Hidden while the overlay is up: that header hosts the same actions,
+          and leaving both in the tree made getByRole find two Approves. The
+          column is covered anyway. */}
+      {!expanded && phaseActions()}
     </div>
   )
 
@@ -382,13 +449,25 @@ export default function SpecDetail({ name, setErr }: SpecDetailProps) {
               label={<Maximize2 className="lucide-inline" />}
             />
           )}
-          <span
-            className="text-[11px] font-mono text-muted overflow-hidden text-ellipsis whitespace-nowrap max-w-[45%]"
-            style={{ direction: 'rtl', textAlign: 'right' }}
-            title={detail?.working_dir || ''}
-          >
-            {detail?.working_dir || ''}
-          </span>
+          {!isMobile && (
+            <span
+              className="text-[11px] font-mono text-muted overflow-hidden text-ellipsis whitespace-nowrap max-w-[45%]"
+              style={{ direction: 'rtl', textAlign: 'right' }}
+              title={detail?.working_dir || ''}
+            >
+              {detail?.working_dir || ''}
+            </span>
+          )}
+          {/* Trailing, after a spacer, so the infrequent destructive control
+              is not flush against the frequent expand-for-review button. */}
+          <span className="w-2 shrink-0" aria-hidden="true" />
+          <Btn
+            onClick={() => setConfirmDelete(true)}
+            disabled={!detail || deleteMutation.isPending}
+            title={i18nT('apps.specBuilder.components.specDetail.delete_this_spec')}
+            ariaLabel={i18nT('apps.specBuilder.components.specDetail.delete_spec_named', { name })}
+            label={<Trash2 className="lucide-inline" />}
+          />
         </header>
         <div className="flex-1 min-h-0 flex flex-col">
           {/* Gated on the detail load. ChatColumn's embedded chat talks to
@@ -404,7 +483,7 @@ export default function SpecDetail({ name, setErr }: SpecDetailProps) {
               <ChatColumn
                 name={name}
                 slotKey={detail.slot_key}
-                onSend={(msg) => messageMutation.mutateAsync(msg)}
+                onSend={sendChat}
               />
             )
             : <ChatColumnSkeleton />}
@@ -469,10 +548,16 @@ export default function SpecDetail({ name, setErr }: SpecDetailProps) {
               built or paused at all. */}
           <div className={`sb-doc flex flex-col overflow-hidden ${isMobile ? 'shrink-0' : 'flex-1 min-h-0'}`}>
             {docTabsHeader(false)}
-            {/* Body HIDDEN, not unmounted: the document itself moves to the
-                overlay, but DocView holds an in-progress comment draft. */}
+            {/* Body HIDDEN, not unmounted, while narrow: DocView holds an
+                in-progress comment draft, and a remount on rotate would drop it.
+                While the overlay is up the column copy is not rendered at all —
+                a second MarkdownRenderer behind an opaque layer doubled parse
+                cost and ran a second selection listener on the same window
+                selection. */}
             <div className={`flex-1 min-h-0 flex flex-col ${isMobile ? 'hidden' : ''}`}>
-              <DocView detail={detail} tab={tab} addComment={addComment} running={running} />
+              {!expanded && (
+                <DocView detail={detail} tab={tab} addComment={addComment} running={running} composer={docComposer} />
+              )}
             </div>
           </div>
           {/* Visible at every width. This is the only surface that shows a
@@ -527,14 +612,14 @@ export default function SpecDetail({ name, setErr }: SpecDetailProps) {
         <div
           role="dialog"
           aria-modal="true"
-          aria-label={i18nT('apps.specBuilder.components.specDetail.review_document', { document: tab }) + '.md for ' + name}
+          aria-label={i18nT('apps.specBuilder.components.specDetail.review_document_named', { document: tab, name })}
           tabIndex={-1}
-          ref={(el) => el?.focus()}
+          ref={overlayRef}
           className="absolute inset-0 z-[60] bg-bg flex flex-col outline-none"
           style={{ padding: '14px 26px 20px' }}
         >
           <style>{DOC_CSS}</style>
-          <div className="flex items-center gap-2.5 mb-2.5 shrink-0">
+          <div className="flex items-center gap-2.5 mb-2.5 shrink-0 flex-wrap">
             <span className="text-[15px] font-bold text-text-strong">{name}</span>
             <span className="text-[12px] font-mono px-2.5 py-[3px] rounded-full" style={{ color: ACCENT, background: SEL_BG }}>{i18nT('apps.specBuilder.components.specDetail.document_file_name', { name: tab })}</span>
             <span className="flex-1" />
@@ -544,6 +629,7 @@ export default function SpecDetail({ name, setErr }: SpecDetailProps) {
               onChange={setTab}
               layoutId="sb-doc-tabs-overlay"
             />
+            {phaseActions()}
             <Btn
               onClick={() => setExpanded(false)}
               title={i18nT('apps.specBuilder.components.specDetail.close_esc')}
@@ -553,10 +639,40 @@ export default function SpecDetail({ name, setErr }: SpecDetailProps) {
           </div>
           <div className="flex-1 min-h-0 flex justify-center">
             <div className="sb-doc flex flex-col border border-border rounded-lg bg-card overflow-hidden min-h-0" style={{ width: 'min(980px, 100%)' }}>
-              <DocView detail={detail} tab={tab} addComment={addComment} running={running} />
+              <DocView detail={detail} tab={tab} addComment={addComment} running={running} composer={docComposer} />
             </div>
           </div>
         </div>
+      )}
+
+      {confirmDelete && (
+        <Modal
+          open
+          onClose={() => { if (!deleteMutation.isPending) setConfirmDelete(false) }}
+          title={i18nT('apps.specBuilder.components.specDetail.remove_this_spec')}
+          maxWidth={440}
+          footer={
+            <>
+              <Btn
+                label={i18nT('apps.specBuilder.components.specDetail.cancel')}
+                disabled={deleteMutation.isPending}
+                onClick={() => setConfirmDelete(false)}
+              />
+              <Btn
+                label={deleteMutation.isPending
+                  ? i18nT('apps.specBuilder.components.specDetail.removing')
+                  : i18nT('apps.specBuilder.components.specDetail.remove_spec', { name })}
+                danger
+                disabled={deleteMutation.isPending}
+                onClick={() => deleteMutation.mutate()}
+              />
+            </>
+          }
+        >
+          <p className="text-[13px] leading-relaxed text-text m-0">
+            {i18nT('apps.specBuilder.components.specDetail.remove_spec_body', { name })}
+          </p>
+        </Modal>
       )}
     </div>
   )
