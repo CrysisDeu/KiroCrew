@@ -334,7 +334,7 @@ async def _audit_denied(caller: str, request: web.Request, error: str) -> None:
 
     * OFF THE LOOP — ``log_api_access`` only enqueues, but the first ``sel()``
       of a process CONSTRUCTS the log: trust-dir creation, key validation, and
-      on Windows an ``icacls`` subprocess to lock the key file's DACL. A fresh
+      on Windows the owner-only DACL on the key file. A fresh
       dashboard whose first state-changing request is cross-origin would run
       that synchronously on the event loop and stall every other request.
     * BEST-EFFORT — a trust root too short to sign the chain makes construction
@@ -1497,7 +1497,7 @@ def _write_secret_file(secret_path: Path, secret: str) -> None:
             # OSError, which would defeat the cleanup-and-reraise below — a
             # pre-existing file with loose perms would stay loose and the caller
             # never learns. On POSIX this applies chmod 0o600 by path;
-            # on Windows an owner-only DACL via icacls (fchmod doesn't exist on
+            # on Windows an owner-only DACL (fchmod doesn't exist on
             # Windows, where a raw fchmod would be a silent no-op).
             platform_compat.restrict_to_owner(secret_path)
             with os.fdopen(fd, "w") as f:
@@ -2899,7 +2899,7 @@ async def start_dashboard(
 
     # Warm the auth singletons (signing secret + revoked-nonce store) off the
     # event loop BEFORE building the middleware chain, so no blocking key-file
-    # I/O (or Windows icacls subprocess) lands on the loop on the first auth op.
+    # I/O lands on the loop on the first auth op.
     await warm_auth_singletons()
 
     # Explicit middleware ordering — self-documenting and immune to future insertions
@@ -3000,8 +3000,8 @@ async def start_dashboard(
     _unix_socket_holder["path"] = await _start_unix_site(runner, port)
 
     # Port bind succeeded — now safe to write the secret file. Offloaded:
-    # _write_secret_file does blocking fs I/O (os.open/os.close and, on Windows,
-    # an icacls subprocess via restrict_to_owner), so it must not run on the
+    # _write_secret_file does blocking fs I/O (os.open/os.close, plus the
+    # owner-only lockdown on Windows), so it must not run on the
     # event loop (no-blocking-call-on-event-loop). The port is passed so the
     # credential is published per listener, not only into the shared file every
     # gateway in this data home writes (see _write_instance_credentials).
@@ -3664,7 +3664,7 @@ async def start_api_server(
     # Port bind succeeded — now safe to persist the secret file (parity with
     # start_dashboard: write deferred so a failed bind can't poison it).
     # Offloaded: _write_secret_file does blocking fs I/O (os.open/os.close and,
-    # on Windows, an icacls subprocess via restrict_to_owner), so it must not run
+    # on Windows, the owner-only DACL), so it must not run
     # on the event loop (no-blocking-call-on-event-loop). Same per-listener
     # publication as start_dashboard: both surfaces must pair the credential
     # with the port or a client cannot tell which generation it reached.

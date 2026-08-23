@@ -239,7 +239,7 @@ def test_persist_restricts_the_file_to_the_owner(spool: Path, monkeypatch: pytes
     """
     seen: list[str] = []
     monkeypatch.setattr(
-        capture_macos.platform_compat, "restrict_to_owner", lambda path: seen.append(str(path))
+        capture_macos.platform_compat, "restrict_to_owner", lambda path, **_kw: seen.append(str(path))
     )
     path = capture_macos.persist_jpeg(_JPEG)
     assert seen == [path]
@@ -250,7 +250,7 @@ def test_persist_continues_when_restrict_to_owner_fails(
 ):
     """A failed restriction warns and continues — the file is in a 0o700 dir."""
 
-    def _boom(path):
+    def _boom(path, **_kw):
         raise OSError("unsupported")
 
     monkeypatch.setattr(capture_macos.platform_compat, "restrict_to_owner", _boom)

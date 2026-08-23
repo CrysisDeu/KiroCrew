@@ -323,7 +323,8 @@ async def api_connections_mint(request: web.Request) -> web.Response:
 
     # Off the loop: only the append is queued to SEL's writer thread. The FIRST
     # sel() of a process CONSTRUCTS the log -- trust-dir creation, key validation,
-    # and on Windows an icacls subprocess -- and this handler runs BEFORE the audit
+    # and on Windows the owner-only DACL on the key file -- and this handler runs
+    # BEFORE the audit
     # middleware's own call (that one logs the response), so on a fresh gateway
     # whose first state-changing request is a Connect click it would land here and
     # stall every other request. Same reasoning as server._audit_denied.
@@ -421,7 +422,7 @@ async def api_connections_cancel(request: web.Request) -> web.Response:
     dropped = await cancel_mint(slug, token)
 
     # Off the loop: the FIRST sel() of a process constructs the log (trust-dir
-    # creation, key validation, on Windows an icacls subprocess). Same reasoning
+    # creation, key validation, on Windows the owner-only DACL). Same reasoning
     # as api_connections_mint above.
     await asyncio.to_thread(
         lambda: sel().log_api_access(

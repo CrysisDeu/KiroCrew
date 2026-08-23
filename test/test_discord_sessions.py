@@ -1806,7 +1806,7 @@ class TestExpectationStoreInvariants:
 
         restricted: list[str] = []
         pc = resume_expectation.platform_compat
-        monkeypatch.setattr(pc, "restrict_to_owner", restricted.append)
+        monkeypatch.setattr(pc, "restrict_to_owner", lambda p, **_kw: restricted.append(p))
         store = resume_expectation.ResumeExpectations()
         await store.record("c1", "dashboard:chat-1", "Launch plan")
         assert restricted, "the record was written without restricting it to its owner"

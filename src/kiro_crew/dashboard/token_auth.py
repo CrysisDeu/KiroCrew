@@ -178,9 +178,10 @@ class RevokedNonceStore:
                 self._state_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
                 # Create the temp file EMPTY, lock it down, and only then write
-                # the nonces. On Windows restrict_to_owner shells out to icacls,
-                # so writing first would leave the denylist under the
-                # parent-inherited DACL for the length of that call. O_TRUNC also
+                # the nonces. Writing first would leave the denylist under the
+                # parent-inherited DACL for the length of the lockdown call —
+                # brief now that it is in-process, but still a window on a file
+                # whose contents are security state. O_TRUNC also
                 # empties a stale temp file an earlier crash left behind, so the
                 # lockdown never applies on top of someone else's contents.
                 os.close(os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
@@ -982,10 +983,10 @@ def write_app_secret(app_name: str, secret: str) -> None:
     secret_path = secret_dir / ".app_secret"
     # os.O_TRUNC truncates any pre-existing file BEFORE the DACL tightens,
     # then restrict_to_owner locks it down while it is still empty, then we
-    # write the secret bytes. This ordering matters on Windows because
-    # restrict_to_owner shells out to icacls (subprocess) — if we wrote first
-    # the secret would sit under the parent-inherited DACL during the icacls
-    # window. On failure we unlink the just-created empty file (mirroring
+    # write the secret bytes. This ordering matters on Windows because the
+    # lockdown replaces the file's DACL rather than being set at create time —
+    # if we wrote first the secret would sit under the parent-inherited DACL
+    # until that call landed. On failure we unlink the just-created empty file (mirroring
     # dashboard/server.py:_write_secret_file) so we don't leave a zero-byte
     # .app_secret under the default DACL that a later successful write
     # (which does not re-inherit on O_TRUNC) could then populate.
@@ -994,7 +995,7 @@ def write_app_secret(app_name: str, secret: str) -> None:
         # restrict_to_owner (fail-loud), NOT fchmod_safe: fchmod_safe swallows
         # OSError, which would defeat the cleanup-and-reraise below for this
         # app secret. On POSIX applies chmod 0o600 by path; on
-        # Windows an owner-only DACL via icacls (fchmod doesn't exist on
+        # Windows an owner-only DACL (fchmod doesn't exist on
         # Windows, where an IS_POSIX no-op would let per-app secrets
         # land readable by other local users).
         platform_compat.restrict_to_owner(secret_path)
@@ -1357,7 +1358,7 @@ async def warm_auth_singletons() -> None:
 
     Both ``_get_secret()`` and ``_get_revoked_store()`` do blocking file I/O on
     first use (read/create ``token_signing.key`` + read the persisted nonce
-    denylist; on Windows an ``icacls`` subprocess to lock the key file's DACL).
+    denylist; on Windows also the owner-only DACL on the key file).
     Calling them lazily from the request path — or synchronously inside the
     ``token_auth_middleware()`` factory, which runs on the loop via the async
     ``start_dashboard()`` / ``start_api_server()`` — would land that I/O on the
@@ -1835,8 +1836,8 @@ def token_auth_middleware(
     # NOTE: the signing-secret and revoked-nonce singletons are NOT warmed
     # here anymore. This factory is invoked from `start_dashboard()` /
     # `start_api_server()`, which are `async def` and therefore run ON the
-    # event loop — a synchronous warm-up here (blocking key-file read + a
-    # Windows `icacls` subprocess on first create) would block the loop during
+    # event loop — a synchronous warm-up here (blocking key-file read plus, on
+    # Windows, an owner-only DACL on first create) would block the loop during
     # startup (no-blocking-call-on-event-loop). The async startup paths instead
     # `await warm_auth_singletons()` (which offloads to a worker thread) BEFORE
     # constructing this middleware chain, so the first auth op still hits the

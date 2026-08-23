@@ -463,7 +463,7 @@ class TestPersistJpeg:
         monkeypatch.setattr(C, "shots_dir", lambda: str(tmp_path))
         monkeypatch.setattr(C, "trim_shots_dir", lambda: None)
         monkeypatch.setattr(C, "_dir_ready", True)
-        monkeypatch.setattr(C.platform_compat, "restrict_to_owner", lambda p: tightened.append(p))
+        monkeypatch.setattr(C.platform_compat, "restrict_to_owner", lambda p, **_kw: tightened.append(p))
         path = C.persist_jpeg(b"JPEGBYTES")
         assert path and pathlib.Path(path).read_bytes() == b"JPEGBYTES"
         assert tightened == [path], "the frame was written without an owner-only DACL"
@@ -472,7 +472,7 @@ class TestPersistJpeg:
         """The image is already written; discarding it would lose the observation over a
         defence-in-depth step the per-user %TEMP% partly covers."""
 
-        def boom(p):
+        def boom(p, **_kw):
             raise OSError("icacls unavailable")
 
         monkeypatch.setattr(C, "shots_dir", lambda: str(tmp_path))
@@ -502,8 +502,8 @@ class TestEnsureShotsDir:
         assert made == [str(target)]
 
     def test_the_tighten_runs_ONCE_per_process(self, monkeypatch, tmp_path) -> None:
-        """``restrict_to_owner`` shells out to icacls on Windows; once per screenshot
-        would put a subprocess on the capture path."""
+        """``restrict_to_owner`` rewrites a DACL on Windows; once per screenshot
+        would put that on the capture path."""
         calls: list = []
         monkeypatch.setattr(C, "shots_dir", lambda: str(tmp_path / "s"))
         monkeypatch.setattr(C, "_dir_ready", False)

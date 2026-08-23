@@ -422,6 +422,7 @@ def atomic_write(
     newline: str | None = None,
     restrict_to_owner: bool = False,
     restrict_on_error: RestrictErrorPolicy = "raise",
+    restrict_require_local_volume: bool = False,
 ) -> None:
     """Write *content* to *path* atomically via unique temp file + rename.
 
@@ -472,6 +473,16 @@ def atomic_write(
     after a warn; on Windows ``fchmod_safe`` is a no-op, so a warn genuinely
     publishes the file under its inherited ACL. That is the exposure those
     callers accept today, stated rather than implied.
+
+    *restrict_require_local_volume* is for a caller that applies the lockdown
+    INLINE ON THE ASYNCIO EVENT LOOP. On Windows a DACL write to a UNC path or a
+    mapped network drive is an unbounded SMB round-trip, which would park the
+    loop; setting this refuses the lockdown on such a volume instead. It defaults
+    to False because refusing is itself a loss -- the file then keeps its
+    inherited ACL -- so only a caller that genuinely cannot offload should set
+    it. Today that is ``config/loader.py``'s ``write_config_atomically``, whose
+    Windows branch runs on the loop; every other caller here is a synchronous
+    CLI path, a startup path, or already inside ``asyncio.to_thread``.
     """
     binary = isinstance(content, bytes)
     if binary and newline is not None:
@@ -505,7 +516,9 @@ def atomic_write(
             # mcp_gateway/rewriter.py: the DACL lands while the file is still
             # empty, so a secret never exists in a readable file.
             try:
-                platform_compat.restrict_to_owner(tmp)
+                platform_compat.restrict_to_owner(
+                    tmp, require_local_volume=restrict_require_local_volume
+                )
             except OSError:
                 if restrict_on_error == "raise":
                     raise

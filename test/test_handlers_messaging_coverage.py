@@ -1380,7 +1380,7 @@ class TestWriteEnvUpdates:
         env = tmp_path / ".env"
         monkeypatch.setattr(loader, "env_path", lambda: env)
 
-        def _boom(path: Any) -> None:
+        def _boom(path: Any, **_kw: Any) -> None:
             raise OSError("chmod refused")
 
         monkeypatch.setattr(platform_compat, "restrict_to_owner", _boom)

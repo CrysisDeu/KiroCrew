@@ -747,7 +747,7 @@ def test_env_sidecar_directory_goes_through_make_owner_only_dir(
 def test_failed_sidecar_protection_leaves_no_readable_credentials(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """An icacls failure must not leave the credentials on disk.
+    """A lockdown failure must not leave the credentials on disk.
 
     The previous order wrote the sidecar first (with a mode argument that is
     inert on Windows) and applied the DACL afterwards, catching the failure with

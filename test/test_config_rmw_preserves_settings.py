@@ -238,8 +238,8 @@ class TestWriteConfigAtomically:
         reason=(
             "POSIX mode bits only: atomic_write applies `mode` via fchmod_safe, "
             "which is a documented no-op on Windows (access there is carried by "
-            "the DACL, and applying one would mean an icacls subprocess — which "
-            "this function must not run, see write_config_atomically)."
+            "the DACL, which write_config_atomically applies on its Windows "
+            "branch instead — see test_windows_applies_an_owner_only_dacl)."
         ),
     )
     def test_preserves_existing_mode(self, tmp_path):
@@ -277,24 +277,50 @@ class TestWriteConfigAtomically:
         assert not stat.S_IMODE(path.stat().st_mode) & 0o077
 
     def test_does_not_spawn_a_subprocess_on_the_event_loop(self, tmp_path, monkeypatch):
-        """Must not call restrict_to_owner: it shells out to icacls on Windows.
+        """No spawn, on either platform.
 
         This function runs inside async request handlers and KiroCrewConfig.save(),
-        so a blocking subprocess here would freeze the gateway's event loop —
-        the `no-blocking-call-on-event-loop` AUTOSDE rule. Pinned because the
-        obvious "harden the file" reflex reintroduces it.
+        so a blocking subprocess here would freeze the gateway's event loop — the
+        `no-blocking-call-on-event-loop` AUTOSDE rule. Pinned because the obvious
+        "harden the file" reflex used to reintroduce it: the owner-only lockdown
+        was an icacls subprocess, which is why this function used to skip it
+        entirely. It now applies the DACL in-process, so the ban is on SPAWNING,
+        not on hardening — hardening is asserted positively below.
         """
         import subprocess
 
-        from kiro_crew import platform_compat
         from kiro_crew.config.loader import write_config_atomically
 
         def _fail(*a, **k):  # pragma: no cover - must never run
             raise AssertionError("write_config_atomically must not spawn a subprocess")
 
         monkeypatch.setattr(subprocess, "run", _fail)
-        monkeypatch.setattr(platform_compat, "restrict_to_owner", _fail)
         write_config_atomically(tmp_path / "config.json", {"auto_update": True})
+
+    @pytest.mark.skipif(
+        platform_compat.IS_POSIX,
+        reason="Windows DACL branch (POSIX carries access in the mode bits)",
+    )
+    def test_windows_applies_an_owner_only_dacl(self, tmp_path):
+        """The Windows half of the guarantee the mode tests cover on POSIX.
+
+        config.json can hold inline provider tokens, and on Windows the mode bits
+        are inert — so without this the file lands under whatever DACL it inherits
+        from its parent, readable by every other local account. No mode assertion
+        can catch that (NTFS reports 0o666 regardless), so the descriptor itself
+        is the observable.
+        """
+        from kiro_crew import windows_acl
+        from kiro_crew.config.loader import write_config_atomically
+
+        path = tmp_path / "config.json"
+        write_config_atomically(path, {"slack": {"bot_token": "xoxb-secret"}})
+
+        described = windows_acl.describe(path)
+        expected = {"S-1-3-4", platform_compat.current_user_sid()}
+        writers = {w.sid for w in described.writers}
+        assert not described.null_dacl
+        assert writers <= expected, f"unexpected writers: {sorted(writers - expected)}"
 
     @pytest.mark.skipif(
         not platform_compat.IS_POSIX,

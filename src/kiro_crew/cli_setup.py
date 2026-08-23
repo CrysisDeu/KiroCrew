@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from kiro_crew import platform_compat, slack_manifest
 from kiro_crew.acp.client import KIRO_CLI_BIN
+from kiro_crew.atomic_write import atomic_write
 from kiro_crew.cli_chat import _ensure_default_agent_in_config
 from kiro_crew.conductor_skill import generate_conductor_skill
 from kiro_crew.config import KiroCrewConfig
@@ -496,10 +497,18 @@ def _setup_slack_tokens() -> None:
     if owner_id:
         existing[CRED_OWNER_ID] = owner_id
 
-    cred_path.parent.mkdir(parents=True, exist_ok=True)
+    # restrict_to_owner rather than a bare chmod: this file holds the Slack app
+    # and bot tokens, and on Windows chmod only toggles the read-only attribute
+    # while leaving the inherited DACL intact, so the tokens would stay readable
+    # by every other local account with nothing raised to notice. The helper
+    # applies the lockdown to the temp file BEFORE any content reaches it, so the
+    # tokens never exist in a world-readable file even briefly.
+    #
+    # Fail-loud is deliberate here (restrict_on_error defaults to "raise"): the
+    # wizard is interactive and re-runnable, so refusing to persist credentials
+    # we cannot protect is better than reporting success on an exposed file.
     lines = [f"{k}={v}" for k, v in existing.items()]
-    cred_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    cred_path.chmod(0o600)
+    atomic_write(cred_path, "\n".join(lines) + "\n", restrict_to_owner=True)
     print(f"  ✅ Credentials saved to {cred_path}\n")
 
 

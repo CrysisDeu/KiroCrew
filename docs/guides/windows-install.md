@@ -261,8 +261,13 @@ signing key, refresh-token state, per-app secrets, snapshot tarballs, and the
 cron internal-secret temp file — are locked down to the current user via an
 owner-only NTFS DACL (inheritance stripped, `S-1-3-4:F` = Owner Rights full
 control). This is applied through `platform_compat.restrict_to_owner`, which
-routes to `os.chmod(..., 0o600)` on POSIX and `icacls /inheritance:r /grant:r
-"*S-1-3-4:F"` on Windows. Failure is fail-loud (raises `OSError`) so the
+routes to `os.chmod(..., 0o600)` on POSIX and, on Windows, builds the descriptor
+in-process through `advapi32` (`SetNamedSecurityInfoW` with
+`PROTECTED_DACL_SECURITY_INFORMATION`, the equivalent of
+`icacls /inheritance:r /grant:r "*S-1-3-4:F"`). It is a direct API call rather
+than a subprocess -- measured 0.24 ms against 313 ms for the equivalent `icacls`
+invocation -- so it is safe to call on the gateway's event loop. Failure is
+fail-loud (raises `OSError`) so the
 security-warning handlers in each caller fire — a naive `if IS_POSIX: os.chmod`
 guard would silently no-op on Windows, leaving secrets group/world-readable
 under NTFS.

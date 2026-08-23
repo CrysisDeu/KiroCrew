@@ -83,7 +83,7 @@ def test_flush_persists_when_os_fchmod_is_absent(
 
     protected: list[str] = []
 
-    def _fake_restrict(p: object) -> None:
+    def _fake_restrict(p: object, **_kw) -> None:
         protected.append(str(p))
         # The DACL must land while the file is still empty.
         assert os.path.getsize(str(p)) == 0, "content written before protection"
@@ -128,7 +128,7 @@ def test_flush_closes_fd_when_restrict_to_owner_raises(
 
     monkeypatch.setattr(os, "close", _tracking_close)
 
-    def _failing_restrict(_path: object) -> None:
+    def _failing_restrict(_path: object, **_kw: object) -> None:
         raise OSError(13, "Access is denied")
 
     monkeypatch.setattr(pc, "restrict_to_owner", _failing_restrict)

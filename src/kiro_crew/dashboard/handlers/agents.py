@@ -137,7 +137,7 @@ async def _require_owner(request: web.Request, operation: str) -> web.Response |
     if is_owner_dashboard_request(request):
         return None
     # Off the loop: the FIRST sel() of a process CONSTRUCTS the log — trust-dir
-    # creation, key validation, and on Windows an icacls subprocess — so on a
+    # creation, key validation, and on Windows the owner-only DACL — so on a
     # fresh gateway whose first mutating request is non-owner this would stall
     # every other request. Same reasoning as connections._audit_started.
     caller = str(request.get("user") or "unknown")

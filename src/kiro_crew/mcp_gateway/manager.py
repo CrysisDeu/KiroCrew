@@ -205,11 +205,12 @@ class GatewayManager:
         # primary access boundary (a 0600 socket alone is insufficient on a
         # shared host), and on Windows it is where the singleton lock file and
         # the out-of-band reap list live since the pipe itself has no entry.
-        # Off the event loop: on Windows the owner-only step shells out to
-        # icacls with a multi-second timeout, and this runs inside the live
-        # gateway's loop (dashboard toggle -> _init_mcp_gateway -> start()),
-        # so calling it inline stalls chat turns and the liveness heartbeat.
-        # Mirrors the log-file hunk below, which offloads the same helper.
+        # Off the event loop: prepare_dir does blocking filesystem work
+        # (directory creation plus the owner-only DACL on Windows), and this runs
+        # inside the live gateway's loop (dashboard toggle -> _init_mcp_gateway
+        # -> start()), so calling it inline stalls chat turns and the liveness
+        # heartbeat. Mirrors the log-file hunk below, which offloads the same
+        # helper.
         await asyncio.to_thread(transport.prepare_dir, self._spec.socket_path)
 
         try:
@@ -337,8 +338,8 @@ class GatewayManager:
         # os.fchmod is a silent no-op on Windows, where mode bits carry no
         # access meaning -- the real carrier is the DACL. restrict_to_owner is
         # the fail-loud owner-only variant and is called by attribute so the
-        # hermetic-test stub in conftest can intercept it. It shells out to
-        # icacls on Windows, so it runs off the event loop.
+        # hermetic-test stub in conftest can intercept it. It does blocking
+        # filesystem work, so it runs off the event loop.
         try:
             await asyncio.to_thread(platform_compat.restrict_to_owner, log_path)
         except OSError as exc:

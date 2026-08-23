@@ -2046,8 +2046,8 @@ class TestProbeTempContainment:
         home.mkdir()
         monkeypatch.setattr(bt, "config_dir", lambda: home)
         monkeypatch.setattr(platform_compat, "IS_POSIX", False)
-        # The IS_POSIX patch also flips restrict_dir_to_owner onto its icacls
-        # branch, which cannot run on the POSIX host executing this test --
+        # The IS_POSIX patch also flips restrict_dir_to_owner onto its Windows
+        # DACL branch, which cannot run on the POSIX host executing this test --
         # shim it to POSIX behavior so ALLOCATION survives and the test
         # exercises the logic it targets.
         monkeypatch.setattr(
@@ -2056,7 +2056,7 @@ class TestProbeTempContainment:
             # 0o700 is the RESTRICTIVE mode for a directory (see the identical
             # suppression in platform_compat.restrict_dir_to_owner itself).
             # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions  # noqa: E501
-            lambda p: os.chmod(p, 0o700),
+            lambda p, **_kw: os.chmod(p, 0o700),
         )
 
         # Pre-seed a PRIOR probe's dead+idle dir: the deferral path must run
@@ -2105,8 +2105,8 @@ class TestProbeTempContainment:
         home.mkdir()
         monkeypatch.setattr(bt, "config_dir", lambda: home)
         monkeypatch.setattr(platform_compat, "IS_POSIX", False)
-        # The IS_POSIX patch also flips restrict_dir_to_owner onto its icacls
-        # branch, which cannot run on the POSIX host executing this test --
+        # The IS_POSIX patch also flips restrict_dir_to_owner onto its Windows
+        # DACL branch, which cannot run on the POSIX host executing this test --
         # shim it to POSIX behavior so ALLOCATION survives and the test
         # exercises the logic it targets.
         monkeypatch.setattr(
@@ -2115,7 +2115,7 @@ class TestProbeTempContainment:
             # 0o700 is the RESTRICTIVE mode for a directory (see the identical
             # suppression in platform_compat.restrict_dir_to_owner itself).
             # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions  # noqa: E501
-            lambda p: os.chmod(p, 0o700),
+            lambda p, **_kw: os.chmod(p, 0o700),
         )
 
         server = McpServerInfo(name="spawnfail", command=sys.executable, args=["-c", "pass"])

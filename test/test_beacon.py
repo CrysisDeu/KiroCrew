@@ -964,7 +964,7 @@ class TestTelemetryCliWrite:
         monkeypatch.setattr(
             cli_commands.platform_compat,
             "restrict_to_owner",
-            lambda p: (calls.append(str(p)), real(p))[1],
+            lambda p, **_kw: (calls.append(str(p)), real(p))[1],
         )
         _telemetry = cli_commands._telemetry
         _telemetry(self._args("disable"))

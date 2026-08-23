@@ -3358,8 +3358,8 @@ async def _telegram_config_save_locked(request: web.Request) -> web.Response:
                     relabel="session_folder" in staged,
                 )
     if env_updates:
-        # Off-loop: on Windows the owner-only lockdown shells out to icacls,
-        # which must not block the event loop.
+        # Off-loop: writing .env is blocking filesystem work (and the owner-only
+        # lockdown on Windows), which must not block the event loop.
         await asyncio.to_thread(_write_env_updates, env_updates)
         # Keep the live process environment in sync with the new .env state
         # (load_credentials() lets os.environ win over .env — see the Slack
@@ -3646,8 +3646,9 @@ async def api_teams_config_save(request: web.Request) -> web.Response:
                     relabel="session_folder" in changes,
                 )
         if env_updates:
-            # Off-loop: restrict_to_owner spawns whoami/icacls subprocesses on
-            # Windows, which would stall the gateway loop if run inline.
+            # Off-loop: _write_env_updates does blocking filesystem work and, on
+            # Windows, the owner-only lockdown, which would stall the gateway
+            # loop if run inline.
             await asyncio.to_thread(_write_env_updates, env_updates)
             for key, new_val in env_updates.items():
                 if new_val is None:
@@ -4392,8 +4393,8 @@ async def _wecom_config_save_locked(request: web.Request) -> web.Response:
                     relabel="session_folder" in staged,
                 )
     if env_updates:
-        # Off-loop: on Windows the owner-only lockdown shells out to icacls,
-        # which must not block the event loop.
+        # Off-loop: writing .env is blocking filesystem work (and the owner-only
+        # lockdown on Windows), which must not block the event loop.
         await asyncio.to_thread(_write_env_updates, env_updates)
         # Keep the live process environment in sync with the new .env state
         # (load_credentials() lets os.environ win over .env — see the Slack

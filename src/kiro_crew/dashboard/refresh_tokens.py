@@ -338,9 +338,9 @@ class RefreshStateManager:
             try:
                 self._state_path.parent.mkdir(parents=True, exist_ok=True)
                 # Create-empty → tighten-DACL → write, NOT write-then-restrict:
-                # on Windows restrict_to_owner is a subprocess (icacls) that
-                # takes measurable time, so if the payload were written first
-                # the temp would carry the parent-inherited DACL during that
+                # on Windows restrict_to_owner REPLACES the file's DACL rather
+                # than setting it at create time, so if the payload were written
+                # first the temp would carry the parent-inherited DACL during that
                 # window and a local co-tenant able to enumerate ~/.kiro/crew
                 # could read the consumed-JTI + revoked-chain state (breaking
                 # RFC-6819 §5.2.2.3 reuse-detection secrecy) or, worse,

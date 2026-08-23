@@ -948,7 +948,6 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # only caller-supplied element is the path being revealed — which is
         # passed as a later argv element, never as the command.
         "platform_compat.py::open_with_default_app",
-        "platform_compat.py::_current_user_sid",
         "platform_compat.py::_posix_process_parent_map",
         "platform_compat.py::find_listening_pids",
         "platform_compat.py::find_python_interpreter",
@@ -962,11 +961,6 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # through the sandbox helper because sandbox imports platform_compat.
         "platform_compat.py::process_owner_uid",
         "platform_compat.py::process_matches",
-        # The single icacls chokepoint shared by restrict_to_owner (file shape)
-        # and restrict_dir_to_owner (directory shape, inheritable grants). Both
-        # public helpers delegate here, so this one entry covers the owner-only
-        # DACL spawn for every caller; neither public name spawns directly.
-        "platform_compat.py::_icacls_owner_only",
         # OS keep-awake helper for the prevent-sleep feature (power.py). FIXED
         # argv — `caffeinate -i -w <pid>` on macOS, `systemd-inhibit
         # --what=idle:sleep --mode=block … /bin/sh -c 'while kill -0 <pid> …'`

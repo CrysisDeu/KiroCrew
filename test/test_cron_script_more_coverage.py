@@ -958,7 +958,9 @@ def script_run(monkeypatch, tmp_path):
     monkeypatch.setattr(cron_script, "_resolve_internal_secret", lambda port: "unit-secret")
     restricted: list[str] = []
     monkeypatch.setattr(
-        cron_script.platform_compat, "restrict_to_owner", restricted.append
+        cron_script.platform_compat,
+        "restrict_to_owner",
+        lambda p, **_kw: restricted.append(p),
     )
     state = SimpleNamespace(
         script=script, proc=None, argv=[], env={}, launcher_src="", restricted=restricted

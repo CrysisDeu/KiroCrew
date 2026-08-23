@@ -453,7 +453,7 @@ class TestCrossOsPermissions:
         sizes: list[int] = []
         real_restrict = webhooks.platform_compat.restrict_to_owner
 
-        def _measuring_restrict(target):
+        def _measuring_restrict(target, **_kw):
             sizes.append(Path(target).stat().st_size)
             return real_restrict(target)
 
@@ -596,7 +596,7 @@ class TestCrossOsPermissions:
         def _spy_fchmod(fd: int, mode: int) -> None:
             seen.append(("fchmod_safe", mode))
 
-        def _spy_restrict(path) -> None:
+        def _spy_restrict(path, **_kw) -> None:
             # Still a temp file at this point: locking down only after the
             # rename would leave the secrets briefly readable at the real path.
             seen.append(("restrict_to_owner", str(path).endswith(".tmp")))
@@ -611,7 +611,7 @@ class TestCrossOsPermissions:
 
     def test_failed_lockdown_leaves_no_file_behind(self, store, monkeypatch):
         """A store holding secrets must not land if it cannot be locked down."""
-        def _boom(path) -> None:
+        def _boom(path, **_kw) -> None:
             raise OSError("icacls unavailable")
 
         monkeypatch.setattr(webhooks.platform_compat, "restrict_to_owner", _boom)

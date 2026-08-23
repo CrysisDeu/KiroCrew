@@ -2746,7 +2746,7 @@ def test_layer_b_is_discarded_when_owner_lockdown_fails(monkeypatch, tmp_path):
 
     monkeypatch.setattr(st, "kiro_sessions_dir", lambda: tmp_path)
 
-    def _refuse(_path):
+    def _refuse(_path, **_kw):
         raise OSError("cannot resolve the invoking user's SID")
 
     monkeypatch.setattr(st, "restrict_to_owner", _refuse)

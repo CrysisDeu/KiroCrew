@@ -1041,7 +1041,7 @@ def test_signing_secret_persisted_across_loads(tmp_path, monkeypatch) -> None:
     assert key_file.exists()
     assert len(s1) >= 32
     # Owner-only permissions. POSIX enforces this via chmod 0o600; Windows applies
-    # an owner DACL (icacls) that does not surface in st_mode (files report
+    # an owner DACL that does not surface in st_mode (files report
     # 0o666), so the POSIX-bit assertion is only meaningful off Windows (the
     # Windows DACL path is covered by test_platform_compat::TestRestrictToOwner).
     if os.name != "nt":
@@ -1104,7 +1104,7 @@ def test_signing_secret_concurrent_first_init_converges(tmp_path, monkeypatch) -
     assert all(r == on_disk for r in results), "concurrent inits diverged from the on-disk key"
     assert len(set(results)) == 1, "more than one distinct signing key was issued"
     # Winner's create still locked the file down to owner-only. POSIX enforces
-    # this via chmod 0o600; Windows applies an owner-only DACL (icacls) that does
+    # this via chmod 0o600; Windows applies an owner-only DACL that does
     # NOT surface in st_mode (files report 0o666), so the POSIX-bit assertion is
     # only meaningful off Windows — the Windows DACL path has direct coverage in
     # test_platform_compat::TestRestrictToOwner.
@@ -2018,7 +2018,7 @@ def test_revoked_store_locks_the_file_down_to_its_owner(tmp_path, monkeypatch) -
     locked: list[tuple[str, int]] = []
     real_restrict = platform_compat.restrict_to_owner
 
-    def _spy(path) -> None:
+    def _spy(path, **_kw) -> None:
         # Record the size at lockdown time: the nonce list must not be sitting
         # in the file yet (see the ordering assertion below).
         locked.append((str(path), os.path.getsize(str(path))))
@@ -2036,9 +2036,9 @@ def test_revoked_store_locks_the_file_down_to_its_owner(tmp_path, monkeypatch) -
         "local accounts")
     locked_path, size_at_lockdown = locked[0]
     assert size_at_lockdown == 0, (
-        "the denylist was written before the lockdown applied; on Windows "
-        "restrict_to_owner shells out to icacls, so the nonces would sit under "
-        "the parent-inherited DACL for the length of that call")
+        "the denylist was written before the lockdown applied; on Windows the "
+        "lockdown replaces the DACL rather than setting it at create time, so "
+        "the nonces would sit under the parent-inherited DACL until it landed")
     assert locked_path.startswith(str(state_path)), (
         f"locked down {locked_path}, which is not the store's own temp file")
 
@@ -2543,8 +2543,8 @@ def test_warm_auth_singletons_primes_both_off_loop(monkeypatch) -> None:
     the middleware serves requests.
 
     Both lazily do blocking file I/O on first use (read/create
-    token_signing.key + read the nonce denylist; on Windows an icacls
-    subprocess to lock the DACL). They are NO LONGER warmed synchronously in
+    token_signing.key + read the nonce denylist; on Windows also the owner-only
+    DACL). They are NO LONGER warmed synchronously in
     the token_auth_middleware() factory, because that factory runs on the loop
     via the async start_dashboard()/start_api_server(). The async startup paths
     await this helper instead, so the first auth op hits warm singletons with

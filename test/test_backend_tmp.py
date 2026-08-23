@@ -54,7 +54,7 @@ class TestAllocate:
         calls: list[str] = []
         real = pc.restrict_dir_to_owner
 
-        def _spy(path):
+        def _spy(path, **_kw):
             calls.append(str(path))
             real(path)
 

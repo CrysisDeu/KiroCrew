@@ -182,8 +182,9 @@ def _admits(surface: str, resource: str, probe: "Callable[[], bool]") -> bool:
     rather than silently gaining unaudited egress.
 
     SYNCHRONOUS BY DESIGN, and callers on the event loop must run it in a worker
-    thread. SEL initialization can shell out (``icacls`` on a fresh Windows
-    gateway), so calling this inline from a coroutine would stall every request.
+    thread. SEL initialization does blocking filesystem work (trust-dir creation,
+    key validation, and on Windows an owner-only DACL), so calling this inline
+    from a coroutine would stall every request.
     """
     from kiro_crew.platform.context import safe_context_call
 

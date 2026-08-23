@@ -826,17 +826,22 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
     ``atomic_write``'s ``mode`` routes through ``fchmod_safe``, which applies the
     mode on POSIX and is a documented no-op on Windows.
 
-    **This deliberately does NOT call ``platform_compat.restrict_to_owner``.**
-    That helper shells out to ``icacls`` on Windows (``subprocess.run``, 10s
-    timeout), and this function is called from ``async`` request handlers and from
-    ``KiroCrewConfig.save()`` — so invoking it here would put a blocking subprocess
-    on the gateway's asyncio event loop, freezing every task including the liveness
-    heartbeat (the ``no-blocking-call-on-event-loop`` rule; the repo offloads that
-    helper via ``asyncio.to_thread`` everywhere else for exactly this reason).
-    Omitting it is no worse than the truncate-then-write this replaced, which
-    applied no DACL either, while ``mode`` still tightens the POSIX case and new
-    files are created ``0600``. A caller that needs a hard owner-only guarantee on
-    Windows must offload ``restrict_to_owner`` itself, off the loop.
+    **Windows gets a real owner-only DACL, not just the inert mode.** This used
+    to deliberately skip ``platform_compat.restrict_to_owner`` because that helper
+    shelled out to ``icacls`` — a blocking subprocess this function could not
+    afford, being called from ``async`` request handlers and from
+    ``KiroCrewConfig.save()``. That constraint no longer exists: the lockdown is
+    applied in-process through ``advapi32`` (measured at 0.24 ms, against 313 ms
+    for the subprocess it replaced), so it is safe on the event loop and the
+    reason to omit it is gone. Since ``config.json`` can carry inline provider
+    tokens and API keys, applying it is the correct default rather than a duty
+    pushed onto each caller.
+
+    The two guarantees do not collide, because they apply on different platforms:
+    mode preservation is a POSIX concept (Windows has no bits to preserve), and
+    the DACL is a Windows concept. Hence the platform branch below rather than
+    passing both to ``atomic_write``, which refuses ``restrict_to_owner=True``
+    alongside a wider explicit ``mode``.
 
     **Symlinks are followed, not replaced.** ``os.replace`` renames over the link
     itself, turning a symlinked ``config.json`` into a regular file and orphaning
@@ -856,7 +861,36 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
     except OSError:
         mode = 0o600
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(path, json.dumps(data, indent=2) + "\n", fsync=fsync, mode=mode)
+    payload = json.dumps(data, indent=2) + "\n"
+    if platform_compat.IS_POSIX:
+        atomic_write(path, payload, fsync=fsync, mode=mode)
+    else:
+        # Windows: the mode bits above are inert (fchmod_safe is a documented
+        # no-op), so there is nothing to preserve and no conflict with
+        # restrict_to_owner's implied 0600. Taking the lockdown here rather than
+        # leaving it to callers also closes the window a post-write lockdown
+        # would leave: atomic_write applies the DACL to the temp file BEFORE any
+        # content reaches it, so an inline credential never exists in a file
+        # readable by other local accounts.
+        #
+        # restrict_on_error="warn", not the default "raise": config.json must not
+        # become unwritable because a DACL could not be applied. Same trade-off
+        # sel.py and dashboard/refresh_tokens.py already take, and strictly
+        # better than the previous behavior, which applied no DACL at all.
+        atomic_write(
+            path,
+            payload,
+            fsync=fsync,
+            restrict_to_owner=True,
+            restrict_on_error="warn",
+            # This branch is the ONE lockdown caller that runs inline on the
+            # asyncio event loop (async dashboard handlers reach it on every
+            # config write), so it is the one that cannot absorb an unbounded SMB
+            # round-trip to a UNC or mapped-drive data home. Every other caller
+            # leaves this False and keeps applying the DACL on a network volume,
+            # exactly as the icacls implementation did.
+            restrict_require_local_volume=True,
+        )
 
 
 def update_config_locked(
