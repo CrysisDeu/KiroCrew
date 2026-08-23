@@ -140,18 +140,26 @@ _JSON_TOKEN_READ_IDS = (
 # running OS is inert, and a platform-independent module constant is what lets
 # tests patch the tuple without becoming host-dependent.
 #
-# The Windows entry is the fixed default Roaming location, NOT resolved from
-# ``%APPDATA%``. Membership here is a trust claim (``from_cli_store=True``)
-# that rests on agent file tools being unable to write the store, and that
-# fence (``_SENSITIVE_HOME_DIRS``) is home-anchored at exactly this path — so
-# an APPDATA-resolved location either equals this entry or falls outside the
-# fence and must not be trusted. A redirected Roaming profile therefore keeps
-# the text-scrape fallback rather than gaining a forgeable trusted path; the
-# same posture as the Linux entry, which does not follow ``XDG_DATA_HOME``
-# redirection either.
+# The Windows entries are the fixed default locations, NOT resolved from
+# ``%LOCALAPPDATA%`` / ``%APPDATA%``. Membership here is a trust claim
+# (``from_cli_store=True``) that rests on agent file tools being unable to write
+# the store, and that fence (``_SENSITIVE_HOME_DIRS``) is home-anchored at
+# exactly these paths — so an env-resolved location either equals one of these
+# entries or falls outside the fence and must not be trusted. A redirected
+# profile therefore keeps the text-scrape fallback rather than gaining a
+# forgeable trusted path; the same posture as the Linux entry, which does not
+# follow ``XDG_DATA_HOME`` redirection either.
+#
+# BOTH AppData roots are listed because the installed CLI is observed using
+# either one, and Local is first because it is where a kiro-cli that keeps its
+# data beside its own executable puts the store. Every path here must also be
+# fenced: an entry the fence does not cover is a trusted path an agent file tool
+# could forge, which is why this tuple and ``_SENSITIVE_HOME_DIRS`` are tied
+# together by ``test_windows_identity_store_paths_agree``.
 _CLI_SQLITE_DBS = (
     Path.home() / ".local" / "share" / "kiro-cli" / "data.sqlite3",
     Path.home() / "Library" / "Application Support" / "kiro-cli" / "data.sqlite3",
+    Path.home() / "AppData" / "Local" / "kiro-cli" / "data.sqlite3",
     Path.home() / "AppData" / "Roaming" / "kiro-cli" / "data.sqlite3",
 )
 
@@ -162,6 +170,8 @@ _CLI_SQLITE_DBS = (
 _OTHER_SQLITE_DBS = (
     Path.home() / ".local" / "share" / "amazon-q" / "data.sqlite3",
     Path.home() / "Library" / "Application Support" / "amazon-q" / "data.sqlite3",
+    Path.home() / "AppData" / "Local" / "amazon-q" / "data.sqlite3",
+    Path.home() / "AppData" / "Roaming" / "amazon-q" / "data.sqlite3",
 )
 _SQLITE_TOKEN_KEYS = ("kirocli:odic:token", "codewhisperer:odic:token", "kirocli:social:token", "kirocli:external-idp:token")
 
@@ -425,6 +435,49 @@ class _Candidate(NamedTuple):
     from_cli_store: bool
 
 
+def _windows_appdata_product(db: Path) -> str | None:
+    """Return the product name when ``db`` is a Windows AppData store, else None."""
+
+    parts = db.parts
+    if len(parts) < 4:
+        return None
+    if parts[-4] == "AppData" and parts[-3] in ("Local", "Roaming"):
+        return parts[-2]
+    return None
+
+
+def _trustable_stores(dbs: tuple[Path, ...]) -> tuple[Path, ...]:
+    """Existing stores, minus any Windows product whose BOTH roots hold one.
+
+    A host that migrated between AppData roots can keep a stale database in the
+    root it no longer uses, and nothing in a path proves which root the running
+    CLI writes to. Trusting both would let the stale one win on freshest-expiry
+    and be shown as the signed-in account with ``from_cli_store=True`` -- the
+    provenance claim that exists precisely to mean "this IS the CLI's own live
+    credential". So when both roots hold a store, NEITHER carries the claim: the
+    host falls back to the untrusted text-scrape path, which is the same answer
+    it got before either root was trusted, rather than a confident wrong one.
+
+    Applied only to the trusted tuple. The other-product tuple is already
+    ``from_cli_store=False`` and can never satisfy the source-anchored path -- it
+    needs a matching profile ARN, which proves the account independently -- so a
+    stale entry there cannot become the wrong account.
+    """
+
+    present = [db for db in dbs if db.exists()]
+    counts: dict[str, int] = {}
+    for db in present:
+        product = _windows_appdata_product(db)
+        if product:
+            counts[product] = counts.get(product, 0) + 1
+    return tuple(
+        db
+        for db in present
+        if (product := _windows_appdata_product(db)) is None
+        or counts.get(product, 0) < 2
+    )
+
+
 def _candidate_tokens() -> list[_Candidate]:
     """Return all unexpired candidates to try, freshest expiry first (deduped).
 
@@ -464,7 +517,7 @@ def _candidate_tokens() -> list[_Candidate]:
 
     for read_id in _JSON_TOKEN_READ_IDS:
         _add(_token_from_json(read_id, now), from_cli_store=False)
-    for db in _CLI_SQLITE_DBS:
+    for db in _trustable_stores(_CLI_SQLITE_DBS):
         _add(_token_from_sqlite(db, now), from_cli_store=True)
     for db in _OTHER_SQLITE_DBS:
         _add(_token_from_sqlite(db, now), from_cli_store=False)

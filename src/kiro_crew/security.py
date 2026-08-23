@@ -4753,10 +4753,17 @@ _SENSITIVE_HOME_DIRS: list[str] = [
     ".local/share/amazon-q",
     "Library/Application Support/kiro-cli",
     "Library/Application Support/amazon-q",
-    # Windows layout of the same stores (%APPDATA% defaults to
-    # ~/AppData/Roaming). This matcher is home-anchored, so a Roaming profile
+    # Windows layout of the same stores. BOTH AppData roots are fenced because
+    # the installed CLI is observed using either one: %LOCALAPPDATA%
+    # (~/AppData/Local) on a host whose kiro-cli keeps its data beside its own
+    # executable, and %APPDATA% (~/AppData/Roaming) elsewhere. Fencing only one
+    # leaves the live SSO bearer token readable through the shared gate on every
+    # host that uses the other, so the fence covers the union rather than
+    # betting on one layout. This matcher is home-anchored, so a profile
     # redirected outside the home directory is not covered — the default
-    # location is what agent file tools can reach by a fixed relative path.
+    # locations are what agent file tools can reach by a fixed relative path.
+    "AppData/Local/kiro-cli",
+    "AppData/Local/amazon-q",
     "AppData/Roaming/kiro-cli",
     "AppData/Roaming/amazon-q",
 ]
@@ -5423,26 +5430,64 @@ def _build_sensitive_regex() -> re.Pattern[str]:
     win_sensitive_path = (
         rf"{win_home_alts}{win_gsep}(?:{win_dirs_pattern})(?:{win_sep}|\s|$|['\"])"
     )
-    # ``%APPDATA%`` already points INTO ``AppData\Roaming``, so a spelling like
+    # ``%APPDATA%`` already points INTO ``AppData\Roaming`` and
+    # ``%LOCALAPPDATA%`` into ``AppData\Local``, so a spelling like
     # ``%APPDATA%\kiro-cli\data.sqlite3`` names a fenced store WITHOUT the
-    # ``AppData\Roaming`` text the branch above anchors on. Map the variable
-    # directly onto that prefix: entries under ``AppData/Roaming/`` are matched
-    # by their remainder.
-    appdata_var = (
-        r"(?:%APPDATA(?::[^%\s]*)?%"
-        rf"|{re.escape('$env:APPDATA')}"
-        rf"|{re.escape('${env:APPDATA}')})"
+    # ``AppData\Roaming`` text the branch above anchors on -- each variable needs
+    # its own alias branch.
+    #
+    # Between the variable and the store name, accept ONLY navigation segments:
+    # the current/parent markers and the AppData root names. That vocabulary is
+    # CLOSED, and it is the whole vocabulary a spelling can use to move around
+    # inside AppData -- so this covers every navigation spelling at once
+    # (``\..\Roaming``, ``\..\.\Roaming``, ``\.\..\Roaming``,
+    # ``\..\..\AppData\Local``, ``\..\Roaming\.``) rather than the one spelling a
+    # reviewer happens to name. Matching these one at a time is a losing game:
+    # each new ``..``/``.`` interleaving is a fresh hole, and the fence is only
+    # sound if the whole class is closed.
+    #
+    # Refusing an ARBITRARY directory name here is what keeps this from becoming
+    # a match-anything: ``%LOCALAPPDATA%\Programs\kiro-cli\bin\...`` is a program
+    # directory, not a credential store, and must stay readable.
+    #
+    # The destination root deliberately does NOT have to be identified. Both
+    # roots are fenced for the same products, so any navigation that lands on a
+    # fenced product name is fenced whichever root it ends in. If a future entry
+    # fences a product under only ONE root, this over-matches that name under the
+    # other -- the safe direction for a gate that blocks on naming alone, and the
+    # same fail-safe posture as the generalized separator above.
+    appdata_products = "|".join(
+        sorted(
+            {
+                win_gsep.join(re.escape(part) for part in d.split("/")[2:])
+                for d in _SENSITIVE_HOME_DIRS
+                if d.startswith("AppData/")
+            }
+        )
     )
-    appdata_remainders = "|".join(
-        win_gsep.join(re.escape(part) for part in d.split("/")[2:])
-        for d in _SENSITIVE_HOME_DIRS
-        if d.startswith("AppData/Roaming/")
-    )
-    # ``%APPDATA%`` ends in ``Roaming`` by definition, so ``\..\Roaming``
-    # right after it is a canonical no-op specific to this anchor.
+    # ``\.`` and ``\..`` are the markers; the root names let a spelling re-enter
+    # a root it stepped out of, including via ``AppData`` itself. Every boundary
+    # takes one-or-more separators, because Windows collapses a repeated
+    # separator (``AppData\Local\\kiro-cli`` resolves to the store) and a
+    # single-separator boundary would let that spelling past.
+    appdata_nav_chain = rf"(?:{win_sep}+(?:\.\.?|AppData|Local|Roaming))*{win_sep}+"
+    appdata_alias_paths: list[str] = []
+    for var_name in ("APPDATA", "LOCALAPPDATA"):
+        if not appdata_products:
+            continue
+        alias_var = (
+            rf"(?:%{var_name}(?::[^%\s]*)?%"
+            rf"|{re.escape('$env:' + var_name)}"
+            rf"|{re.escape('${env:' + var_name + '}')})"
+        )
+        appdata_alias_paths.append(
+            rf"{alias_var}{appdata_nav_chain}(?:{appdata_products})"
+            rf"(?:{win_sep}|\s|$|['\"])"
+        )
+    # An empty alternation would match the empty string and turn this branch
+    # into a match-anything, so fall back to a pattern that never matches.
     appdata_sensitive_path = (
-        rf"{appdata_var}(?:{win_sep}\.\.{win_sep}Roaming)*"
-        rf"{win_gsep}(?:{appdata_remainders})(?:{win_sep}|\s|$|['\"])"
+        "(?:" + "|".join(appdata_alias_paths) + ")" if appdata_alias_paths else r"(?!)"
     )
     # Windows-native spelling of the write-protected leaves. The POSIX leaf
     # branch above anchors on ``/`` separators, so on Windows the resolved home
@@ -5551,11 +5596,12 @@ def _build_sensitive_regex() -> re.Pattern[str]:
         rf"|(?:^|.*[\s'\"=:,;]){write_protected_path}"
         # (4) Windows-native spelling, verb-independent (same token anchor):
         # covers quoted backslash paths AND embedded-script literals that the
-        # tokenizing passes cannot see. (5) the %APPDATA% alias of the fenced
-        # Roaming stores. (6) the write-protected leaves in that same native
-        # spelling, which branch (3) cannot see. (7) the distinctive leaves as a
-        # bare path SEGMENT, with no anchor at all, because branches (3) and (6)
-        # both fall to a ``cd`` plus a relative name.
+        # tokenizing passes cannot see. (5) the %APPDATA% / %LOCALAPPDATA%
+        # aliases of the fenced AppData stores. (6) the write-protected leaves in
+        # that same native spelling, which branch (3) cannot see. (7) the
+        # distinctive leaves as a bare path SEGMENT, with no anchor at all,
+        # because branches (3) and (6) both fall to a ``cd`` plus a relative
+        # name.
         rf"|(?:^|.*[\s'\"=:,;]){win_sensitive_path}"
         rf"|(?:^|.*[\s'\"=:,;]){appdata_sensitive_path}"
         rf"|(?:^|.*[\s'\"=:,;]){win_write_protected_path}"

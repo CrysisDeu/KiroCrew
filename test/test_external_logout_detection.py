@@ -475,21 +475,32 @@ class TestStorePathSelection:
             tmp_path / "Library" / "Application Support" / "kiro-cli" / "data.sqlite3"
         )
 
-    def test_windows_reads_roaming_not_local(self, tmp_path: Path) -> None:
-        """The identity lives under Roaming; Local holds no credential.
+    def test_windows_reads_whichever_appdata_root_holds_the_store(self, tmp_path: Path) -> None:
+        """The identity lives under EITHER AppData root, so both are anchors.
 
-        Reading Local on Windows would make every fingerprint "absent", so a
-        logout would look identical to a signed-in state and no child would ever
-        be retired there.
+        Naming one fixed root read a path that does not exist on the hosts using
+        the other, making every fingerprint there "absent" -- a logout would look
+        identical to a signed-in state and no child would ever be retired.
         """
 
+        # Neither present: a deterministic anchor, and "absent" either way.
         path = kp.kiro_identity_store_path("win32", tmp_path, {})
-        assert path == tmp_path / "AppData" / "Roaming" / "kiro-cli" / "data.sqlite3"
+        assert path.relative_to(tmp_path).parts == (
+            "AppData",
+            "Local",
+            "kiro-cli",
+            "data.sqlite3",
+        )
+
+        # Only Roaming present: it is selected rather than read as absent.
+        roaming = tmp_path / "AppData" / "Roaming" / "kiro-cli"
+        roaming.mkdir(parents=True)
+        (roaming / "data.sqlite3").write_bytes(b"")
         # Anchor on the tail BELOW the home we passed, never on global parts: on
         # Windows CI tmp_path itself lives under AppData\Local\Temp, so a bare
         # `"Local" not in path.parts` asserts something about the fixture's prefix
         # rather than about which directory this function chose.
-        assert path.relative_to(tmp_path).parts == (
+        assert kp.kiro_identity_store_path("win32", tmp_path, {}).relative_to(tmp_path).parts == (
             "AppData",
             "Roaming",
             "kiro-cli",
@@ -602,11 +613,19 @@ class TestStoreRelocation:
             "win32", tmp_path, {"APPDATA": str(tmp_path / "AppData" / "Roaming")}
         )
 
-    def test_localappdata_is_not_a_relocation_signal(self, tmp_path: Path) -> None:
-        """The identity lives under Roaming; LOCALAPPDATA does not move it."""
+    def test_localappdata_is_also_a_relocation_signal(self, tmp_path: Path) -> None:
+        """The identity can live under Local, so LOCALAPPDATA moves it too.
 
-        assert not kp.identity_store_is_relocated(
+        Treating it as irrelevant would read a leftover database at the Local
+        default on a host whose real store had been redirected away, producing a
+        confident fingerprint of an account nobody is signed into.
+        """
+
+        assert kp.identity_store_is_relocated(
             "win32", tmp_path, {"LOCALAPPDATA": str(tmp_path / "elsewhere")}
+        )
+        assert not kp.identity_store_is_relocated(
+            "win32", tmp_path, {"LOCALAPPDATA": str(tmp_path / "AppData" / "Local")}
         )
 
     @pytest.mark.asyncio

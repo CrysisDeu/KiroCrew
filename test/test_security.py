@@ -4620,6 +4620,102 @@ class TestWindowsPathShapes:
         # Other %APPDATA% content stays allowed.
         assert is_sensitive_bash_command('type "%APPDATA%\\SomeApp\\config.json"') is None
 
+    def test_localappdata_alias_of_fenced_store_is_blocked(self) -> None:
+        # %LOCALAPPDATA% points INTO AppData\Local, which holds the store on a
+        # host whose kiro-cli keeps its data beside its own executable. Same
+        # reasoning as the %APPDATA% alias: no AppData\Local text for the
+        # home-anchored branch to match on.
+        cmds = [
+            'del "%LOCALAPPDATA%\\kiro-cli\\data.sqlite3"',
+            "type '%LOCALAPPDATA%\\amazon-q\\data.sqlite3'",
+            'del "$env:LOCALAPPDATA\\kiro-cli\\data.sqlite3"',
+            'del "${env:LOCALAPPDATA}\\kiro-cli\\data.sqlite3"',
+            'cmd /c copy /Y evil.sqlite "%LOCALAPPDATA%\\.\\kiro-cli\\data.sqlite3"',
+            'cmd /c copy "%LOCALAPPDATA:~0%\\kiro-cli\\data.sqlite3" .\\loot.db',
+        ]
+        for cmd in cmds:
+            assert is_sensitive_bash_command(cmd) is not None, cmd
+        # Other %LOCALAPPDATA% content stays allowed.
+        assert (
+            is_sensitive_bash_command('type "%LOCALAPPDATA%\\Programs\\Python\\python.exe"')
+            is None
+        )
+
+    def test_appdata_navigation_spellings_are_all_blocked(self) -> None:
+        # Between the variable and the store name only NAVIGATION segments are
+        # accepted (`.`, `..`, and the AppData root names). That vocabulary is
+        # closed, so every interleaving of them is covered at once -- matching
+        # them one spelling at a time is a losing game, since each new `..`/`.`
+        # arrangement is a fresh hole in the fence.
+        cmds = [
+            # Direct child of either root.
+            'type "%LOCALAPPDATA%\\kiro-cli\\data.sqlite3"',
+            'type "%APPDATA%\\kiro-cli\\data.sqlite3"',
+            'type "%LOCALAPPDATA%\\amazon-q\\data.sqlite3"',
+            # Same-root parent hop (a canonical no-op).
+            'type "%LOCALAPPDATA%\\..\\Local\\kiro-cli\\data.sqlite3"',
+            'type "%APPDATA%\\..\\Roaming\\kiro-cli\\data.sqlite3"',
+            # Cross-root parent hop: the two roots are siblings, so this
+            # resolves to the OTHER fenced store.
+            'type "%LOCALAPPDATA%\\..\\Roaming\\kiro-cli\\data.sqlite3"',
+            'type "%APPDATA%\\..\\Local\\kiro-cli\\data.sqlite3"',
+            # A no-op interleaved anywhere in the chain.
+            'type "%LOCALAPPDATA%\\..\\.\\Roaming\\kiro-cli\\data.sqlite3"',
+            'type "%LOCALAPPDATA%\\.\\..\\Roaming\\kiro-cli\\data.sqlite3"',
+            'type "%LOCALAPPDATA%\\..\\Roaming\\.\\kiro-cli\\data.sqlite3"',
+            # Two levels up and back down through AppData itself.
+            'type "%LOCALAPPDATA%\\..\\..\\AppData\\Roaming\\kiro-cli\\data.sqlite3"',
+            'type "%APPDATA%\\..\\..\\AppData\\Local\\amazon-q\\data.sqlite3"',
+            # Repeated hops.
+            'type "%LOCALAPPDATA%\\..\\Roaming\\..\\Local\\kiro-cli\\data.sqlite3"',
+            # Forward slashes.
+            'type "%LOCALAPPDATA%/../Roaming/kiro-cli/data.sqlite3"',
+            # PowerShell spellings, bare and braced.
+            'Get-Content "$env:LOCALAPPDATA\\..\\.\\Roaming\\kiro-cli\\data.sqlite3"',
+            'Get-Content "${env:APPDATA}\\..\\Local\\amazon-q\\data.sqlite3"',
+            # cmd.exe expansion modifier.
+            'copy "%LOCALAPPDATA:~0%\\..\\Roaming\\kiro-cli\\data.sqlite3" loot.db',
+        ]
+        for cmd in cmds:
+            assert is_sensitive_bash_command(cmd) is not None, cmd
+
+    def test_appdata_repeated_separators_are_blocked(self) -> None:
+        """Windows collapses a repeated separator, so the fence must too.
+
+        ``AppData\\Local\\\\kiro-cli`` resolves to the store, and a boundary that
+        took exactly one separator let that spelling past. Every boundary in the
+        navigation chain takes one-or-more.
+        """
+
+        cmds = [
+            'type "%LOCALAPPDATA%\\\\kiro-cli\\data.sqlite3"',
+            'type "%LOCALAPPDATA%\\\\\\kiro-cli\\data.sqlite3"',
+            'type "%LOCALAPPDATA%\\..\\\\Roaming\\kiro-cli\\data.sqlite3"',
+            'type "%APPDATA%\\\\..\\\\Local\\\\kiro-cli\\data.sqlite3"',
+            'type "%LOCALAPPDATA%/\\kiro-cli\\data.sqlite3"',
+        ]
+        for cmd in cmds:
+            assert is_sensitive_bash_command(cmd) is not None, cmd
+
+    def test_appdata_alias_does_not_swallow_unfenced_paths(self) -> None:
+        """The other half of the class: refusing an ARBITRARY segment name.
+
+        Without this the navigation chain would be a match-anything, and a
+        program directory that merely shares the product's name would stop being
+        readable. This is the case that keeps the widening honest.
+        """
+
+        allowed = [
+            # A program directory named after the product -- not a store.
+            'type "%LOCALAPPDATA%\\Programs\\kiro-cli\\bin\\thing.exe"',
+            'type "%APPDATA%\\npm\\node_modules\\thing.js"',
+            # A traversal that lands somewhere unfenced.
+            'type "%LOCALAPPDATA%\\..\\Local\\npm-cache\\x.json"',
+            'type "%APPDATA%\\SomeApp\\config.json"',
+        ]
+        for cmd in allowed:
+            assert is_sensitive_bash_command(cmd) is None, cmd
+
     def test_backslash_relative_traversal_is_blocked(self) -> None:
         assert is_sensitive_bash_command("type ..\\..\\.aws\\credentials") is not None
         assert (
