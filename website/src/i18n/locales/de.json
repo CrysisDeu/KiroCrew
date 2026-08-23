@@ -106,7 +106,10 @@
     "open_command_bar": "Command Bar oeffnen",
     "focus_mode": "Fokusmodus",
     "focus_mode_title": "Fokusmodus · Alt+Umschalt+M",
-    "focus_mode_title_mac": "Fokusmodus · ⌥⇧M"
+    "focus_mode_title_mac": "Fokusmodus · ⌥⇧M",
+    "active_harness": "Agent-Harness: {{label}}",
+    "active_harness_open_settings": "Agent-Harness: {{label}} — ACP-Adapter-Einstellungen öffnen",
+    "harness_new_sessions": "Neue Sitzungen"
   },
   "appSdk": {
     "chatEmbed": {
@@ -4543,6 +4546,11 @@
       "all_tools_will_get_auto_approved_across_all_sess": "Alle Werkzeuge werden in allen Sitzungen automatisch genehmigt.",
       "approval_mode": "Genehmigungsmodus",
       "approval_mode_aria": "Freigabemodus: {{mode}}",
+      "auto_confirm_body": "{{productName}} wird diese Werkzeugaufrufe nicht sehen. Sie umgehen die Freigabe.",
+      "auto_confirm_title": "Dieser Adapter wird Werkzeuge selbst genehmigen",
+      "auto_desc": "Dieser Adapter genehmigt Werkzeugaufrufe selbst. {{productName}} kann sie nicht prüfen.",
+      "auto_label": "Auto",
+      "auto_tooltip": "Dieser Adapter genehmigt Werkzeugaufrufe selbst — {{productName}} sieht sie nie",
       "cancel": "Abbrechen",
       "configure_duration": "Configure duration",
       "don_t_show_again": "Nicht mehr anzeigen",
@@ -4864,7 +4872,13 @@
       "upload_file": "Datei hochladen",
       "use_a_skill": "Einen Skill verwenden",
       "used": "Verbraucht",
-      "voice_input": "Spracheingabe"
+      "voice_input": "Spracheingabe",
+      "plan_limit": "Plan-Limit",
+      "limit_type": "Limit-Typ",
+      "resets": "Zurücksetzung",
+      "rate_limit_allowed": "OK",
+      "rate_limit_warning": "Nahe am Limit",
+      "rate_limit_rejected": "Limitiert"
     },
     "chatPane": {
       "agent_list": "Agenten-Liste",
@@ -8809,7 +8823,9 @@
       "featurePreviewsTab": {
         "inbound_webhook_tokens_registered_contexts_and_r": "Tokens für eingehende Webhooks, registrierte Kontexte und Ausführungsverlauf. Die API funktioniert, die Seite ist noch nicht fertig.",
         "open_webhooks": "Webhooks öffnen",
-        "webhooks": "Webhooks"
+        "webhooks": "Webhooks",
+        "acp_backends": "ACP-Adapter",
+        "experimental_acp_backends_claude_code_and_openai": "Claude Code und OpenAI Codex als Alternativen zur Kiro CLI. Ablehnungspfade sind getestet; eine erfolgreiche Sitzung wurde noch nicht beobachtet."
       }
     },
     "developerPage": {
@@ -9937,6 +9953,41 @@
         "vector_memory": "Vektor-Erinnerung",
         "vector_memory_is_initializing_the_embedding_mode": "Die Vektor-Erinnerung wird initialisiert. Das Embedding-Modell (~610 MB) wird automatisch im Hintergrund heruntergeladen, und die Legacy-Erinnerung migriert von selbst — kein Eingreifen erforderlich.",
         "verifying_model_integrity": "Modellintegrität wird geprüft…"
+      },
+      "acpBackend": {
+        "title": "ACP-Adapter",
+        "experimental": "Experimentell",
+        "all_features_supported": "Standard. Alle Funktionen werden unterstützt.",
+        "features_differ": "{{count}} von {{total}} Funktionen verhalten sich anders, sind nicht verfügbar oder nicht verifiziert.",
+        "show_what_changes": "Änderungen anzeigen",
+        "applies_to_new_sessions": "Gilt für ab jetzt gestartete Sitzungen. Offene Sitzungen behalten ihren ursprünglichen Adapter.",
+        "not_enabled_in_this_build": "In diesem Build nicht aktiviert: {{backends}}. Siehe die Dokumentation zu experimentellen ACP-Adaptern.",
+        "level_supported": "Unterstützt",
+        "level_degraded": "Funktioniert anders",
+        "level_unavailable": "Nicht verfügbar",
+        "cap_session_sharing": "Gemeinsame Subagent-Laufzeit",
+        "cap_reasoning_effort": "Denkaufwand",
+        "cap_mcp_tool_search": "MCP-Tool-Suche",
+        "cap_agent_profiles": "Agentenprofile",
+        "cap_slash_commands": "Slash-Befehle",
+        "cap_turn_usage": "Nutzung pro Zug",
+        "cap_billing": "Kosten und Limits",
+        "cap_native_resume": "Sitzung fortsetzen",
+        "cap_registry_model_ids": "Verwendet den Kiro-Modellkatalog",
+        "cap_mid_turn_steer": "Steuerung während des Zugs",
+        "confirm_title": "Zu {{backend}} wechseln?",
+        "confirm_body": "Dieser Adapter ist experimentell. {{count}} von {{total}} Kiro-Crew-Funktionen verhalten sich anders, sind nicht verfügbar oder nicht verifiziert.",
+        "confirm_open_sessions": "Offene Sitzungen sind nicht betroffen und behalten ihren aktuellen Adapter.",
+        "cancel": "Abbrechen",
+        "confirm_switch": "Adapter wechseln",
+        "confirm_prerequisites": "Führen Sie diese zuerst auf dem Gateway-Host aus, in dieser Reihenfolge.",
+        "not_installed": "Adapter nicht installiert",
+        "level_unverified": "Nicht verifiziert",
+        "routing_routed": "Tool-Aufrufe erreichen das {{productName}}-Sicherheitstor",
+        "routing_indeterminate": "Die Weiterleitung von Tool-Aufrufen ist nicht verifiziert — neue Sitzungen werden abgelehnt",
+        "routing_bypassed": "Tool-Aufrufe würden das {{productName}}-Sicherheitstor umgehen — neue Sitzungen werden abgelehnt",
+        "routing_reason": "{{reason}}",
+        "ungated_opt_out": "Ungesicherte Tools sind erlaubt. Regeln für verbotene Befehle, die Sperre sensibler Pfade und die Governance-Obergrenze werden für die selbst genehmigten Aufrufe dieses Backends nicht herangezogen."
       }
     },
     "overviewPage": {
@@ -10309,7 +10360,9 @@
       "stopped": "Gestoppt",
       "threads": "Threads",
       "uptime": "Betriebszeit",
-      "working_directory": "Arbeitsverzeichnis"
+      "working_directory": "Arbeitsverzeichnis",
+      "acp_backend": "ACP-Adapter",
+      "acp_backend_experimental": "{{label}} (experimentell)"
     },
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Unscharfer Filter (Teilstring-Übereinstimmung)",

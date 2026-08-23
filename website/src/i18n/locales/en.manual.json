@@ -56,7 +56,10 @@
     "open_command_bar": "Open Command Bar",
     "focus_mode": "Focus mode",
     "focus_mode_title": "Focus mode · Alt+Shift+M",
-    "focus_mode_title_mac": "Focus mode · ⌥⇧M"
+    "focus_mode_title_mac": "Focus mode · ⌥⇧M",
+    "active_harness": "New sessions use {{label}}. Open chats keep the harness they started with.",
+    "active_harness_open_settings": "New sessions use {{label}}. Open chats keep the harness they started with. Open ACP Adapter settings.",
+    "harness_new_sessions": "New sessions"
   },
   "appSdk": {
     "chatEmbed": {
@@ -1248,6 +1251,11 @@
       "yolo_label": "YOLO",
       "yolo_tooltip": "In every chat, {{productName}} works without asking you first",
       "yolo_desc": "In every chat, {{productName}} works without asking you first",
+      "auto_label": "Auto",
+      "auto_tooltip": "This harness approves tool calls itself — {{productName}} never sees them",
+      "auto_desc": "This harness approves tool calls itself. {{productName}} cannot review them.",
+      "auto_confirm_title": "This harness will approve tools itself",
+      "auto_confirm_body": "{{productName}} will not see those tool calls. They skip the approval gate.",
       "configure_duration": "Configure duration",
       "yolo_expiration_until_shutdown": "Stays on until Kiro Crew restarts — no timed expiry.",
       "yolo_expiration_timed": "Turns itself off after {{duration}}, then asks again."
@@ -1374,7 +1382,13 @@
       "voice_input": "Voice input",
       "queue": "Queue",
       "queue_run_after_the_current_work_finishes_desc": "Run after the current work finishes",
-      "steer_act_on_this_right_away_desc": "Act on this right away"
+      "steer_act_on_this_right_away_desc": "Act on this right away",
+      "plan_limit": "Plan limit",
+      "limit_type": "Limit type",
+      "resets": "Resets",
+      "rate_limit_allowed": "OK",
+      "rate_limit_warning": "Near limit",
+      "rate_limit_rejected": "Rate limited"
     },
     "chatPane": {
       "earlier_messages_load_failed": "Couldn't load earlier messages. Scroll to the top of the session to try again.",
@@ -3618,6 +3632,15 @@
       "click_a_notification_to_view_details_jump_to_the": "Click a notification to view details. Jump to the source chat or job from the detail panel."
     },
     "overview": {
+      "acpBackend": {
+        "routing_routed": "Tool calls reach {{productName}}'s security gate",
+        "routing_indeterminate": "Tool-call routing is not verified — new sessions will refuse",
+        "routing_bypassed": "Tool calls would bypass {{productName}}'s security gate — new sessions will refuse",
+        "routing_reason": "{{reason}}",
+        "ungated_opt_out": "Ungated tools are allowed. Denied-command rules, sensitive-path blocking, and the governance ceiling are not consulted for this backend's self-approved calls.",
+        "applies_to_new_sessions": "New chats use this harness. A chat that is already open keeps the one it started with — switching here does not change it mid-session.",
+        "confirm_open_sessions": "This does not switch the harness mid-session. Open chats keep the one they started with until you start a new chat."
+      },
       "agentCfgTab": {
         "agent_config_file": "Agent Config ({{file}})",
         "agent_config_tip": "The {{process}} agent definition — prompt, tools, MCP servers, model settings. This is the execution layer config, separate from {{productName}}'s operational bindings.",

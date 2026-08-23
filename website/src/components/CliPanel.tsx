@@ -85,6 +85,14 @@ function ensureThemeObserver() {
   _themeObserver.observe(document.head, { childList: true })
 }
 
+/** Reset the module-level observer so tests never inherit another case's DOM records. */
+export function __resetTerminalThemeObserverForTests(): void {
+  _themeObserver?.disconnect()
+  _themeObserver = null
+  if (_themeRaf) cancelAnimationFrame(_themeRaf)
+  _themeRaf = 0
+}
+
 /* ── Terminal font sync ──
  * Push the app-wide terminal font preference (useTerminalFont) onto every
  * cached xterm instance when it changes. Font family and size are canvas cell

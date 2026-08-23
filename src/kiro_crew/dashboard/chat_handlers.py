@@ -21,7 +21,7 @@ from aiohttp import web
 from aiohttp.client_exceptions import ClientConnectionResetError
 
 from kiro_crew import model_registry
-from kiro_crew.acp.client import AcpModelUnavailable
+from kiro_crew.acp.client import AcpError, AcpModelUnavailable
 from kiro_crew.agent_discovery import cached_project_agent_names, warm_project_agent_names
 from kiro_crew.config.loader import (
     KiroCrewConfig,
@@ -117,10 +117,12 @@ _SESSION_RELOAD_NOTICE = (
 )
 
 # Approval modes that grant auto-approval to the SLOT they name, as opposed to
-# the process-global YOLO grant. A tuple, not a set: membership is tested against
-# a request-supplied value, and tuple `in` compares by equality rather than
-# hashing, so a non-string body value answers False instead of raising.
-_SLOT_SCOPED_TRUST_MODES = ("trust", "trust_reads")
+# the process-global YOLO grant. ``auto`` is goose session mode auto — it does
+# not auto-answer Crew permission RPCs; it asks the harness not to send them.
+# A tuple, not a set: membership is tested against a request-supplied value,
+# and tuple `in` compares by equality rather than hashing, so a non-string
+# body value answers False instead of raising.
+_SLOT_SCOPED_TRUST_MODES = ("trust", "trust_reads", "auto")
 
 
 def _sweep_stale_permissions(slot: "_ChatSlot") -> None:
@@ -445,7 +447,8 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         # queue entry is durable: a visible message with no queue entry (process
         # exit during a cold-store build) is a request that can never resume.
         _refusal = await _crew.ingest(
-            slot, message,
+            slot,
+            message,
             user_meta=_redact_meta(user_meta) if user_meta else None,
         )
         if _refusal:
@@ -454,8 +457,7 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
             # never run — the transcript note it posts is not visible to an API
             # caller, so the refusal has to reach the status line too.
             return web.json_response(
-                {"error": "crew mode is not available for this session",
-                 "code": _refusal},
+                {"error": "crew mode is not available for this session", "code": _refusal},
                 status=409,
             )
         return web.json_response({"ok": True, "slot": slot.key, "crew": True})
@@ -1039,9 +1041,7 @@ def _generate_state(cfg: KiroCrewConfig, slot: Any) -> str:
     if is_incognito_transcript(getattr(slot, "memory_mode", "")):
         return "unavailable"
     turns = count_user_turns_in_records(getattr(slot, "messages", []) or [])
-    if turns < cfg.session_summary.min_user_turns and not getattr(
-        slot, "_disk_older_count", 0
-    ):
+    if turns < cfg.session_summary.min_user_turns and not getattr(slot, "_disk_older_count", 0):
         return "too_few_turns"
     return "ready"
 
@@ -1623,7 +1623,11 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
                     if current_mem and disk_msgs:
                         # Spot-check last memory row against its expected disk position.
                         last_mem = current_mem[-1]
-                        disk_at = disk_msgs[len(current_mem) - 1] if len(current_mem) <= len(disk_msgs) else None
+                        disk_at = (
+                            disk_msgs[len(current_mem) - 1]
+                            if len(current_mem) <= len(disk_msgs)
+                            else None
+                        )
                         if disk_at and (
                             last_mem.get("ts", "") != disk_at.get("ts", "")
                             or last_mem.get("role") != disk_at.get("role")
@@ -1634,12 +1638,10 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
                     else:
                         # Disk has rows the window does not — reconcile by appending
                         # the missing tail to the slot and returning the union.
-                        fresh = disk_msgs[len(current_mem):]
+                        fresh = disk_msgs[len(current_mem) :]
                         for msg in fresh:
                             role = msg.get("role", "assistant")
-                            cls = msg.get("cls") or (
-                                "msg msg-u" if role == "user" else "msg msg-a"
-                            )
+                            cls = msg.get("cls") or ("msg msg-u" if role == "user" else "msg msg-a")
                             content = msg.get("content", "")
                             if role != "user":
                                 content, _ = redact_exfiltration_urls(content)
@@ -1688,9 +1690,7 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
         history_key = slot_history_key(slot)
         try:
             all_msgs = (
-                await asyncio.to_thread(
-                    state.conversation_log.read_messages_chained, history_key
-                )
+                await asyncio.to_thread(state.conversation_log.read_messages_chained, history_key)
                 if state.conversation_log
                 else []
             )
@@ -1889,8 +1889,10 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
                 and not is_crew_capable_slot_key(_normalize_slot_key(str(name)))
             ):
                 return web.json_response(
-                    {"error": "this session name cannot run crew mode",
-                     "code": "crew_unsupported_slot"},
+                    {
+                        "error": "this session name cannot run crew mode",
+                        "code": "crew_unsupported_slot",
+                    },
                     status=400,
                 )
             slot = state.get_or_create_slot(
@@ -3284,9 +3286,7 @@ async def api_chat_slot_delete(request: web.Request) -> web.Response:
             # The app could not record the dismissal. Refuse the close rather
             # than leave a worker running behind a tab the user believes is gone.
             await _restore_slot_nudge_loop(retired_loop)
-            logger.error(
-                "Slot-close hook for app %r failed on %r, close aborted", slot._app, name
-            )
+            logger.error("Slot-close hook for app %r failed on %r, close aborted", slot._app, name)
             _sync_dashboard_slots(state)
             state.push_slots_update()
             return web.json_response(
@@ -3706,6 +3706,12 @@ def _wire_model_id(provider: AcpProvider, model_name: str) -> str:
         # The claude backend has no id meaning "let the server choose", so
         # returning to default needs a reset.
         return "" if is_default else model_registry.to_provider_id(model_name, "claude_code")
+    if provider.is_codex_backend:
+        from kiro_crew.acp import codex
+
+        return codex.wire_model_id(model_name, is_default=is_default)
+    if provider.is_spec_adapter:
+        return "" if is_default else model_name
     if is_default:
         # kiro DOES express Auto as a real model id — but only switch to it when
         # this session's backend actually advertised it.
@@ -4083,9 +4089,7 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
     name = request.match_info["slot"]
     slot = state._slots.get(name)
     if not slot:
-        return web.json_response(
-            {"error": "not found", "code": "slot_not_found"}, status=404
-        )
+        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
     # The session the reload will tear down. ``effective_session_key``, never
     # ``_history_key_for``: a channel- or cron-born slot runs its turns under
     # its linked key, and the dashboard-prefixed spelling names a session that
@@ -4123,9 +4127,7 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
             # the silent failure this endpoint exists to prevent. Retry once;
             # a second decline means another turn is genuinely racing, which
             # is the turn-in-flight case.
-            reloaded = await _reset_slot_session(
-                state, slot, session_key, skip_if_busy=True
-            )
+            reloaded = await _reset_slot_session(state, slot, session_key, skip_if_busy=True)
             if not reloaded:
                 return web.json_response(
                     {"error": "a turn is in flight", "code": "turn_in_flight"},
@@ -4139,7 +4141,9 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
     # clients dedupe on -- so an explicit broadcast here would deliver the
     # notice twice.
     slot.append(
-        "assistant", _SESSION_RELOAD_NOTICE, "msg msg-a",
+        "assistant",
+        _SESSION_RELOAD_NOTICE,
+        "msg msg-a",
         meta={"kind": SESSION_RELOAD_KIND},
     )
     # Respawn + session/load now rather than on the next message, so the fresh
@@ -4291,9 +4295,7 @@ def _deny_cross_app_slot_access(
         return None  # Dashboard user -- no restriction
     if slot._app and request_app == slot._app:
         return None  # App owns this slot
-    reason = (
-        "app does not own this slot" if slot._app else "app cannot access unscoped slots"
-    )
+    reason = "app does not own this slot" if slot._app else "app cannot access unscoped slots"
     try:
         sel().log_api_access(
             caller=request_app,
@@ -4486,9 +4488,7 @@ async def api_recent_projects(request: web.Request) -> web.Response:
     return web.json_response({"dirs": dirs})
 
 
-async def _reconcile_slot_window(
-    state: DashboardState, slot: "_ChatSlot"
-) -> None:
+async def _reconcile_slot_window(state: DashboardState, slot: "_ChatSlot") -> None:
     """Detect and reconcile stale in-memory window from disk.
 
     A live slot's window can fall behind disk when messages are written to the
@@ -4527,9 +4527,7 @@ async def _reconcile_slot_window(
             state.conversation_log.read_messages_chained, history_key
         )
     except Exception:
-        logger.warning(
-            "reconcile: read_messages_chained failed for %s", history_key, exc_info=True
-        )
+        logger.warning("reconcile: read_messages_chained failed for %s", history_key, exc_info=True)
         return
     disk_total = len(disk_msgs)
     if disk_total <= represented:
@@ -4555,9 +4553,8 @@ async def _reconcile_slot_window(
         last_mem = slot.messages[-1]
         expected_pos = disk_older + len(slot.messages) - 1
         disk_at = disk_msgs[expected_pos]
-        if (
-            last_mem.get("ts", "") != disk_at.get("ts", "")
-            or last_mem.get("role") != disk_at.get("role")
+        if last_mem.get("ts", "") != disk_at.get("ts", "") or last_mem.get("role") != disk_at.get(
+            "role"
         ):
             logger.info(
                 "reconcile: slot %s alignment mismatch at offset %d — skipping "
@@ -5095,6 +5092,117 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
     )
 
 
+async def _clear_goose_permission_auto(state: DashboardState, slot_key: str | None) -> None:
+    """Pin a goose slot back to approve when leaving Auto."""
+    from kiro_crew.acp import goose as goose_backend
+    from kiro_crew.acp.types import ACP_BACKEND_GOOSE
+
+    if slot_key is not None:
+        if slot_key not in state._slots:
+            return
+        slots = [state._slots[slot_key]]
+    else:
+        slots = list(state._slots.values())
+    for slot in slots:
+        client = state._live_slot_acp_client(slot)
+        opted = getattr(slot, "_harness_permission_mode", "") == goose_backend.MODE_AUTO
+        if client is not None and getattr(client, "_goose_permission_opt_in", "") == (
+            goose_backend.MODE_AUTO
+        ):
+            opted = True
+        if not opted:
+            continue
+        slot._harness_permission_mode = ""
+        if client is not None and getattr(client, "backend", None) == ACP_BACKEND_GOOSE:
+            try:
+                await client.set_goose_permission_mode(goose_backend.MODE_APPROVE)
+            except Exception:
+                logger.warning(
+                    "Failed to pin goose back to approve on slot %s",
+                    slot.key,
+                    exc_info=True,
+                )
+
+
+async def _enable_goose_permission_auto(
+    state: DashboardState, slot_key: str | None
+) -> web.Response | None:
+    """Opt a live goose session into session mode auto. None = success."""
+    from kiro_crew.acp import goose as goose_backend
+    from kiro_crew.acp.types import ACP_BACKEND_GOOSE
+
+    if not slot_key or slot_key not in state._slots:
+        return web.json_response(
+            {"ok": False, "error": "unknown slot", "code": "slot_not_found"},
+            status=400,
+        )
+    slot = state._slots[slot_key]
+    client = state._live_slot_acp_client(slot)
+    if client is None:
+        return web.json_response(
+            {
+                "ok": False,
+                "error": "no live session on this slot",
+                "code": "no_live_session",
+            },
+            status=409,
+        )
+    if getattr(client, "backend", None) == ACP_BACKEND_GOOSE:
+        available = list(getattr(client, "_available_mode_ids", []) or [])
+    else:
+        return web.json_response(
+            {
+                "ok": False,
+                "error": "this harness has no permission Auto",
+                "code": "harness_has_no_permission_auto",
+            },
+            status=400,
+        )
+    if goose_backend.MODE_AUTO not in available:
+        return web.json_response(
+            {
+                "ok": False,
+                "error": "this harness did not advertise permission Auto",
+                "code": "permission_auto_unavailable",
+            },
+            status=400,
+        )
+    if not bool(getattr(client, "_allow_ungated_tools", False)):
+        return web.json_response(
+            {
+                "ok": False,
+                "error": ("permission Auto requires " "agent.acp_backend_allow_ungated_tools"),
+                "code": "ungated_tools_opt_out_required",
+            },
+            status=409,
+        )
+    try:
+        await client.set_goose_permission_mode(goose_backend.MODE_AUTO)
+    except AcpError as exc:
+        return web.json_response(
+            {
+                "ok": False,
+                "error": str(exc),
+                "code": "permission_auto_rejected",
+            },
+            status=503,
+        )
+    slot._harness_permission_mode = goose_backend.MODE_AUTO
+    slot._trust = False
+    slot._trust_reads = False
+    state.sessions.set_approval_policy(f"dashboard:{slot_key}", "")
+    try:
+        sel().log_api_access(
+            caller="dashboard:mode",
+            operation="mode_change:auto",
+            outcome="enabled",
+            resources=slot_key,
+        )
+    except Exception:
+        logger.warning("SEL audit failed for auto mode activation", exc_info=True)
+    return None
+
+
 async def api_chat_mode(request: web.Request) -> web.Response:
     """POST /api/chat/mode — set global tool approval mode.
 
@@ -5102,6 +5210,9 @@ async def api_chat_mode(request: web.Request) -> web.Response:
       - ``normal``: reset to interactive (ask for each tool)
       - ``trust``: auto-approve tools for active slot
       - ``yolo``: auto-approve all tools everywhere
+      - ``auto``: goose session mode auto — the harness approves tools
+        itself and PreToolUse never sees them. Offered only when the
+        live goose session advertised that mode.
 
     Unlike the per-tool approve endpoint, this doesn't require a
     pending approval — it preemptively sets the mode for future tools.
@@ -5137,7 +5248,14 @@ async def api_chat_mode(request: web.Request) -> web.Response:
     if mode != "yolo" and (not slot_scoped_trust or safety_override().is_declared):
         safety_override().deactivate("dashboard")
 
-    if mode == "yolo":
+    if mode != "auto":
+        await _clear_goose_permission_auto(state, slot_key)
+
+    if mode == "auto":
+        refused = await _enable_goose_permission_auto(state, slot_key)
+        if refused is not None:
+            return refused
+    elif mode == "yolo":
         result = await asyncio.to_thread(safety_override().activate, "dashboard")
         if not result.active:
             return web.json_response(

@@ -102,7 +102,11 @@ vi.mock('../components/TerminalKeyBar', () => ({ default: () => <div data-testid
 const touch = vi.hoisted(() => ({ value: false }))
 vi.mock('../hooks/useIsTouchDevice', () => ({ useIsTouchDevice: () => touch.value }))
 
-import CliPanel, { disposeTerminalSession, useDeleteTerminalSession } from '../components/CliPanel'
+import CliPanel, {
+  __resetTerminalThemeObserverForTests,
+  disposeTerminalSession,
+  useDeleteTerminalSession,
+} from '../components/CliPanel'
 import { setTerminalFontSize, __resetTerminalFontStore } from '../hooks/useTerminalFont'
 
 /* ── harness ──────────────────────────────────────────────────────────────── */
@@ -194,11 +198,12 @@ afterEach(() => {
   live.clear()
   restoreLayout()
   __resetTerminalFontStore()
-  vi.unstubAllGlobals()
+  __resetTerminalThemeObserverForTests()
   document.documentElement.removeAttribute('data-theme')
   for (const s of Array.from(document.head.querySelectorAll('style'))) {
     if (s.id.startsWith('mc-custom-theme-') || s.id === 'unrelated-style') s.remove()
   }
+  vi.unstubAllGlobals()
 })
 
 /* ── mount / attach ───────────────────────────────────────────────────────── */
