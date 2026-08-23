@@ -11,6 +11,7 @@ import { EXTENSION_TO_FILE_FORMAT, parsePatchFiles, setCustomExtension } from '@
 import { File, FileDiff, MultiFileDiff, Virtualizer, WorkerPoolContext } from '@pierre/diffs/react'
 import { getOrCreateWorkerPoolSingleton } from '@pierre/diffs/worker'
 import { useIsDark } from '../hooks/useIsDark'
+import { recordCacheKey, startPierrePerfReporting } from '../lib/pierrePerf'
 import { PlainCodeFallback } from './PlainCodeFallback'
 import {
   PIERRE_EXTENSION_OVERRIDES,
@@ -68,7 +69,13 @@ export function fenceLanguage(tag?: string): SupportedLanguages {
 export function contentCacheKey(name: string, contents: string): string {
   let h = 5381
   for (let i = 0; i < contents.length; i++) h = ((h << 5) + h + contents.charCodeAt(i)) | 0
-  return `${name}:${contents.length}:${(h >>> 0).toString(36)}`
+  const key = `${name}:${contents.length}:${(h >>> 0).toString(36)}`
+  // Accounting for the streaming re-tokenize hypothesis (see lib/pierrePerf.ts).
+  // This is the right site because it is the one place that observes both halves
+  // of the cost: the O(n) hash just paid, and the key whose churn decides whether
+  // Pierre reuses cached tokens or re-tokenizes the whole file again.
+  recordCacheKey(name, key, contents.length)
+  return key
 }
 
 /** Rewrites hand-written patches into ones Pierre's parser accepts.
@@ -240,6 +247,12 @@ const workerPool = typeof window === 'undefined' || typeof Worker === 'undefined
       },
       highlighterOptions: { theme: PIERRE_THEMES },
     })
+
+// Report highlight churn once this module is live. Placed here rather than in
+// `main.tsx` so the timer only ever runs in a realm that actually renders code:
+// this module is reached through the `React.lazy` boundaries in `./index`, so a
+// tab that never shows a diff never starts it.
+startPierrePerfReporting()
 
 /** Hands every descendant the shared pool. Exported because the editor surface
  *  lives in a sibling module and needs the same one — without it Pierre falls
