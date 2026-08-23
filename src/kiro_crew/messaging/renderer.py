@@ -18,6 +18,13 @@ Channels declaring ``max_buttons=0`` render no widget and route the whole
 trailer through :func:`render_options_as_text`, which reaches the same helper
 with zero widget slots: every choice becomes a numbered line the user answers by
 typing, rather than being deleted along with the trailer.
+
+Webex is the widget channel that ALSO always ships the numbered text: it declares
+Adaptive Card actions, but the inbound half of a press rides an undocumented
+websocket, so the typed form has to stay answerable on its own. It reaches
+:func:`apply_options_cap` directly — the widget-channel path, which returns the
+kept choices for the card as well as the body — rather than
+:func:`render_options_as_text`, which keeps only the body.
 """
 
 from __future__ import annotations
@@ -93,6 +100,43 @@ def chunk_text(text: str, max_chars: int) -> list[str]:
     if max_chars <= 0 or len(text) <= max_chars:
         return [text]
     return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
+
+
+def chunk_for_transport(text: str, capabilities: TransportCapabilities) -> list[str]:
+    """Split *text* into parts the transport will accept, in ITS unit.
+
+    Prefers ``max_message_bytes`` when the platform declares one, because a
+    character count cannot express a byte cap without being wrong in one
+    direction or the other: the only safe char value is the byte budget over four
+    (the worst case for a 4-byte code point), which cuts an ASCII reply into
+    quarters, while the true char cap would let a CJK reply exceed the byte limit
+    and be truncated on send.
+
+    BOTH paths are fence-aware: the byte path via
+    :func:`~kiro_crew.messaging.split.split_markdown_bytes`, the char path via
+    :func:`~kiro_crew.messaging.split.split_markdown_safe`. A blind fixed-width
+    slice through a code block leaves the second chunk with no opener, so every
+    line in it renders as prose and a channel's markdown-dialect converter
+    rewrites the ``**``/``#``/``- `` INSIDE the code -- and a sub-agent diff or
+    cron log dump is exactly that shape. Callers that want a raw fixed-width cut
+    reach for :func:`chunk_text` directly.
+    """
+    # Local imports: split.py is a heavier pure-Python module and only these
+    # paths need it, so the renderer contract stays cheap to import.
+    #
+    # ``getattr`` with the field's own ``0`` default, not attribute access: the
+    # real ``TransportCapabilities`` always carries ``max_message_bytes``, but a
+    # capabilities-shaped object from before the field existed must degrade to the
+    # char path (``0`` = "no byte cap") rather than raising -- the same honest
+    # default the dataclass declares.
+    max_bytes = getattr(capabilities, "max_message_bytes", 0)
+    if max_bytes > 0:
+        from kiro_crew.messaging.split import split_markdown_bytes
+
+        return split_markdown_bytes(text, max_bytes)
+    from kiro_crew.messaging.split import split_markdown_safe
+
+    return split_markdown_safe(text, capabilities.max_message_chars)
 
 
 def cap_choices(

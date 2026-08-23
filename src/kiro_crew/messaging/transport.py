@@ -46,9 +46,14 @@ class TransportCapabilities:
 
     * ``max_message_chars`` — the cross-surface mirror leg chunks on it
       (``dashboard/chat_runner.py``) and five renderers size their own chunks
-      from it. This is a CHARACTER count. A byte-capped platform (Webex) must
-      declare a character value that is safe under its byte limit, because the
-      chunker counts chars and cannot see bytes.
+      from it. This is a CHARACTER count.
+    * ``max_message_bytes`` — the same limit measured in UTF-8 BYTES, for a
+      platform whose cap is bytes (Webex: 7439). ``0`` means "not byte-capped".
+      A char count cannot express a byte cap safely: the only sound char value is
+      the byte budget divided by four (the worst case), which fragments every
+      ASCII reply into quarters. So a byte-capped transport declares BOTH — the
+      char value stays as the safe floor for a caller that can only count chars,
+      and this is what a caller that can measure bytes uses instead.
     * ``supports_proactive_send`` — gates mirror-link creation (HTTP 400) and
       the outbound mirror leg (skipped).
     * ``supports_session_resume`` — gates whether connecting a channel from the
@@ -73,6 +78,13 @@ class TransportCapabilities:
       WHOLE list through ``messaging.renderer.render_options_as_text``, which is
       the same helper with zero widget slots, so every choice arrives as a
       numbered line rather than being deleted with the trailer.
+
+    * ``rich_blocks`` — gates whether a renderer attaches a native widget at
+      all. Webex reads it before building an Adaptive Card, for both the
+      tool-approval prompt (``on_prompt_choice``) and an ``[OPTIONS:]`` trailer
+      (``_options_card``). A channel declaring ``False`` keeps the numbered-text
+      and typed-reply forms, which work everywhere — so the flag decides whether
+      a widget APPEARS, never whether the user can answer.
 
     * ``files_outbound`` — gates whether a renderer pulls local image
       references out of a sealed segment and uploads them. Discord's renderer
@@ -102,7 +114,7 @@ class TransportCapabilities:
     capability-gated interface work will consume them; do NOT write code that
     assumes they are enforced):
 
-    * ``streaming``, ``edit``, ``reactions``, ``rich_blocks``, ``threads``
+    * ``streaming``, ``edit``, ``reactions``, ``threads``
     * ``files_inbound`` — the transport ingests user attachments into the turn.
 
     Defaults are deliberately conservative (the WhatsApp-like floor) so a
@@ -127,6 +139,7 @@ class TransportCapabilities:
     native_tables: bool = False
     # parameters (channels differ widely -- NOT booleans)
     max_message_chars: int = 4096  # CHARS. Slack path caps 3900, Telegram 4000, Discord 1900
+    max_message_bytes: int = 0  # UTF-8 BYTES; 0 = the platform is not byte-capped
     max_buttons: int = 3  # TOTAL interactive choices per prompt (WhatsApp reply buttons = 3)
     # send-policy
     supports_proactive_send: bool = True  # WhatsApp: False outside the 24h window
@@ -147,6 +160,7 @@ class TransportCapabilities:
             "table_mode": self.table_mode,
             "native_tables": self.native_tables,
             "max_message_chars": self.max_message_chars,
+            "max_message_bytes": self.max_message_bytes,
             "max_buttons": self.max_buttons,
             "supports_proactive_send": self.supports_proactive_send,
             "supports_session_resume": self.supports_session_resume,
