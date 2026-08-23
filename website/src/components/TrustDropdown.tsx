@@ -11,12 +11,18 @@ interface TrustDropdownProps {
   fullCommand: string
   baseCommand: string
   isShell: boolean
+  /** When false, only the blanket "Trust all tools" tier renders. Surfaces
+   *  whose backend cannot hold a per-command grant for the pending tool
+   *  (channel cards on non-shell tools — the endpoint refuses with
+   *  pattern_underivable) hide the doomed tiers instead of offering
+   *  actions that always fail. */
+  perCommandTiers?: boolean
   disabled?: boolean
   className?: string
   onAction: (action: string, pattern?: string) => void
 }
 
-export default function TrustDropdown({ fullCommand, baseCommand, isShell, disabled, className, onAction }: TrustDropdownProps) {
+export default function TrustDropdown({ fullCommand, baseCommand, isShell, perCommandTiers = true, disabled, className, onAction }: TrustDropdownProps) {
   const [open, setOpen] = useState(false)
 
   // Pattern shaping lives in utils/trustPatterns so every surface that offers
@@ -39,7 +45,7 @@ export default function TrustDropdown({ fullCommand, baseCommand, isShell, disab
           (measured at 320px, the menu reached 440px and ran off the right edge),
           which hides the very label this menu exists to make readable. */}
       <DropdownMenuContent side="top" align="end" className="min-w-[220px] max-w-[min(450px,calc(100vw-2rem))]">
-        <DropdownMenuItem
+        {perCommandTiers && <DropdownMenuItem
           className="gap-2 text-[12px]"
           onSelect={() => onAction('trust_command', fullCommand)}
         >
@@ -57,8 +63,8 @@ export default function TrustDropdown({ fullCommand, baseCommand, isShell, disab
               components={{ mono: <span className="font-mono" /> }}
             />
           </span>
-        </DropdownMenuItem>
-        {isShell && (
+        </DropdownMenuItem>}
+        {perCommandTiers && isShell && (
           <DropdownMenuItem
             className="gap-2 text-[12px]"
             onSelect={() => onAction('trust_base', basePattern)}

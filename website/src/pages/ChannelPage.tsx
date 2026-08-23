@@ -125,9 +125,19 @@ function AgentBadge({ agent, index }: { agent: ChannelAgent; index: number }) {
   )
 }
 
+/** Tool title embedded in a channel approval message by the backend
+ * (`⚠️ Approval needed: **<name>**` + fenced input). Greedy up to the LAST
+ * `**` before the input fence so a command containing `**` stays whole.
+ * Empty when the message carries no name (legacy messages). The approval
+ * card's TrustDropdown derives its trust_command / trust_base patterns from
+ * this title, so it must be the tool's identity, never the agent role. */
+export function approvalToolTitle(content: string): string {
+  return /^⚠️ Approval needed: \*\*([\s\S]*)\*\*\n```/.exec(content)?.[1] || ''
+}
+
 function MessageBubble({ msg, agents, onReply, onOpenThread, onApprove }: {
   msg: ChannelMessage; agents: ChannelAgent[]
-  onReply?: () => void; onOpenThread?: () => void; onApprove?: (action: string) => void
+  onReply?: () => void; onOpenThread?: () => void; onApprove?: (action: string, pattern?: string) => void
 }) {
   const isHuman = msg.fromId === 'human'
   const approvalMode = useAppSelector((s: RootState) => s.dashboard.approvalMode)
@@ -151,10 +161,16 @@ function MessageBubble({ msg, agents, onReply, onOpenThread, onApprove }: {
           <span className="text-[13px] text-muted ml-auto">{time}</span>
         </div>
         <div className="text-sm text-text">{msg.msgType === 'approval' ? <span className="whitespace-pre-wrap">{msg.content}</span> : <MarkdownRenderer content={msg.content} />}</div>
-        {/* Approval card */}
+        {/* Approval card. The title is the tool name the backend embedded in
+            the message — the TrustDropdown derives its trust_command /
+            trust_base patterns from it, so the agent ROLE (fromRole) is only
+            a fallback for legacy messages without a name. Per-command tiers
+            are shell-only on channels (the endpoint refuses them for
+            non-shell tools with pattern_underivable), so a non-shell card
+            offers just Approve / blanket Trust / Reject. */}
         {msg.msgType === 'approval' && onApprove && (
           <div className="mt-2">
-            <ApprovalCard title={msg.fromRole} toolInput={msg.content.replace(/^⚠️ Approval needed:.*\n```\n?/, '').replace(/\n?```$/, '')} showButtons={approvalMode === 'normal'} onApprove={onApprove} />
+            <ApprovalCard title={approvalToolTitle(msg.content) || msg.fromRole} shellOnlyTrustTiers toolInput={msg.content.replace(/^⚠️ Approval needed:.*\n```\n?/, '').replace(/\n?```$/, '')} showButtons={approvalMode === 'normal'} onApprove={onApprove} />
           </div>
         )}
         {/* Thread badge + reply */}
@@ -669,7 +685,7 @@ export default function ChannelPage() {
                 <MessageBubble key={msg.id} msg={msg} agents={channel.agents}
                   onReply={() => openThread(msg.id)}
                   onOpenThread={() => openThread(msg.id)}
-                  onApprove={msg.msgType === 'approval' ? (action) => api.channelApproveAgent(channel.id, msg.fromId, action).catch(() => {}) : undefined} />
+                  onApprove={msg.msgType === 'approval' ? (action, pattern) => api.channelApproveAgent(channel.id, msg.fromId, action, pattern).catch(() => {}) : undefined} />
               ))}
               {channel.agents.filter(a => a.state === 'working' || a.state === 'tool_running').map(a => (
                 <div key={a.id + '-typing'} className="flex items-center gap-2 px-3 py-1.5 text-[13px] text-muted animate-pulse">
@@ -694,11 +710,11 @@ export default function ChannelPage() {
                 }>
                   <div className="flex flex-col gap-1 -mx-3 -mt-2">
                     {parent && <MessageBubble msg={parent} agents={channel.agents}
-                      onApprove={parent.msgType === 'approval' ? (action) => api.channelApproveAgent(channel.id, parent.fromId, action).catch(() => {}) : undefined} />}
+                      onApprove={parent.msgType === 'approval' ? (action, pattern) => api.channelApproveAgent(channel.id, parent.fromId, action, pattern).catch(() => {}) : undefined} />}
                     {replies.length > 0 && <div className="border-t border-border my-2" />}
                     {replies.map(msg => (
                       <MessageBubble key={msg.id} msg={msg} agents={channel.agents}
-                        onApprove={msg.msgType === 'approval' ? (action) => api.channelApproveAgent(channel.id, msg.fromId, action).catch(() => {}) : undefined} />
+                        onApprove={msg.msgType === 'approval' ? (action, pattern) => api.channelApproveAgent(channel.id, msg.fromId, action, pattern).catch(() => {}) : undefined} />
                     ))}
                     {channel.agents.filter(a => a.state === 'working' || a.state === 'tool_running').map(a => (
                       <div key={a.id + '-typing-t'} className="flex items-center gap-2 px-2 py-1 text-[13px] text-muted animate-pulse">

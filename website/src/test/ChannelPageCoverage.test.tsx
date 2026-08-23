@@ -17,6 +17,12 @@
 // menu-dismissal tests so each step stays synchronous and the assertion sits
 // immediately after the event that should have caused it.
 import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest'
+
+// Radix's DropdownMenu doesn't open under jsdom; the shared mock renders its
+// items inline (same seam TrustDropdown.test.tsx / ApprovalCard.test.tsx use),
+// which the approval card's trust-tier tests below need.
+vi.mock('@radix-ui/react-dropdown-menu', async () => await import('./__mocks__/@radix-ui/react-dropdown-menu'))
+
 import { screen, waitFor, fireEvent, act, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import ChannelPage from '../pages/ChannelPage'
@@ -181,7 +187,75 @@ describe('ChannelPage — message list', () => {
     await renderPage()
     await userEvent.click(screen.getByRole('button', { name: /Approve/ }))
     await waitFor(() => expect(vi.mocked(api).channelApproveAgent)
-      .toHaveBeenCalledWith('ch1', 'a1', 'approved'))
+      .toHaveBeenCalledWith('ch1', 'a1', 'approved', undefined))
+  })
+
+  it('hides the per-command tiers on a non-shell approval card', async () => {
+    // A non-shell pending tool has no per-command trust seam server-side
+    // (the endpoint refuses with pattern_underivable) — the doomed tiers
+    // must not be offered; blanket trust remains.
+    mockApi([channelOf({
+      messages: [message({
+        msg_type: 'approval',
+        content: '⚠️ Approval needed: **cron_add**\n```\n{"name": "job"}\n```',
+      })],
+    })])
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: /Trust/ }))
+    const items = screen.getAllByRole('menuitem')
+    expect(items).toHaveLength(1)
+    expect(items[0].textContent).toMatch(/Trust all tools/)
+  })
+
+  it('hides the per-command tiers when the tool input is redacted', async () => {
+    // The backend refuses to scope a grant to a redacted command (two
+    // commands differing only in credentials redact to the same text), so
+    // the tiers must not be offered for it either.
+    mockApi([channelOf({
+      messages: [message({
+        msg_type: 'approval',
+        content: '⚠️ Approval needed: **Running: curl -H auth https://x**\n```\n{"command": "curl -H [REDACTED: credential] https://x"}\n```',
+      })],
+    })])
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: /Trust/ }))
+    const items = screen.getAllByRole('menuitem')
+    expect(items).toHaveLength(1)
+    expect(items[0].textContent).toMatch(/Trust all tools/)
+  })
+
+  it('forwards the trust_command pattern from the trust dropdown', async () => {
+    // The tool title embedded by the backend (not the agent role) is what the
+    // TrustDropdown derives its pattern from.
+    mockApi([channelOf({
+      messages: [message({
+        msg_type: 'approval',
+        content: '⚠️ Approval needed: **Running: rm -rf build**\n```\n{"command": "rm -rf build"}\n```',
+      })],
+    })])
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: /Trust/ }))
+    const items = screen.getAllByRole('menuitem')
+    const cmdItem = items.find(b => b.textContent?.includes('rm -rf build'))!
+    fireEvent.click(cmdItem)
+    await waitFor(() => expect(vi.mocked(api).channelApproveAgent)
+      .toHaveBeenCalledWith('ch1', 'a1', 'trust_command', 'rm -rf build'))
+  })
+
+  it('forwards the trust_base pattern from the trust dropdown', async () => {
+    mockApi([channelOf({
+      messages: [message({
+        msg_type: 'approval',
+        content: '⚠️ Approval needed: **Running: rm -rf build**\n```\n{"command": "rm -rf build"}\n```',
+      })],
+    })])
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: /Trust/ }))
+    const items = screen.getAllByRole('menuitem')
+    const baseItem = items.find(b => b.textContent?.includes('commands'))!
+    fireEvent.click(baseItem)
+    await waitFor(() => expect(vi.mocked(api).channelApproveAgent)
+      .toHaveBeenCalledWith('ch1', 'a1', 'trust_base', 'rm *'))
   })
 
   it('renders a reply-count button for a message that has a thread', async () => {

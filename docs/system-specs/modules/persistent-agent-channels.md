@@ -65,9 +65,27 @@ ChannelAgent
 1. Agent requests tool use → `_stream_task` intercepts `EVENT_PERMISSION_REQUEST`
 2. Approval message posted to channel with tool details (sanitized)
 3. `asyncio.Future` created before broadcast (prevents race condition)
-4. Human clicks Approve/Reject/Trust via REST endpoint
-5. Trust mode auto-approves subsequent calls for that agent
-6. SEL audit logged for trust escalation and approval decisions
+4. Human clicks Approve/Reject or picks a trust tier via REST endpoint
+   (`trust` = channel-wide, `trust_command` / `trust_base` = per-command
+   grants scoped to that agent). Per-command grants are derived SERVER-SIDE
+   from the pending approval's canonical shell command (stashed from the
+   provider event's `tool_input`); the request-body `pattern` is the CONSENT
+   PROOF and must agree with that command — a stale card or an
+   LLM-influenced title that diverged from the real command gets 400
+   `approval_superseded`. Grants are OPAQUE LITERALS with no pattern
+   language: the exact tier stores the whole command text (matched by
+   case-sensitive string equality), the base tier stores one shlex-derived
+   binary name (matched by token equality; compound / quoted / env-prefixed
+   / unparseable commands are refused with 400 `pattern_underivable`).
+   Shell-only: a non-shell pending tool gets 400 `pattern_underivable`, and
+   the card hides the per-command tiers for non-shell and redaction-marked
+   tools
+5. Channel trust auto-approves all subsequent calls for the channel;
+   per-command grants auto-approve only shell tool calls whose command
+   (extracted from `tool_input` when the provider classified the tool as
+   shell, never the LLM-authored title) equals a granted command text or is
+   a simple invocation of a granted base binary
+6. SEL audit logged for trust escalation, pattern grants, and approval decisions
 
 ## Limits
 
@@ -98,7 +116,14 @@ an Orchestrator agent as the first member.
 - **LLM output sanitization**: `redact_exfiltration_urls` + `redact_credentials` on all agent output
 - **Tool input sanitization**: Credentials and URLs redacted in approval messages
 - **SEL audit**: All trust escalations and approval decisions logged via `sel().log_tool_invocation()`
-- **Approval validation**: Decision allowlist (`approved`, `rejected`, `trust`) enforced in both handler and channel
+- **Approval validation**: Decision allowlist (`approved`, `rejected`, `trust`,
+  `trust_command`, `trust_base`) enforced in the handler; `trust_command` /
+  `trust_base` require a `pattern` consent proof matching the pending shell
+  command (400 `approval_superseded` on mismatch, `pattern_required` when
+  absent, `pattern_underivable` when no simple shell command is pending),
+  store the grant server-side as an opaque literal, SEL-log every refusal
+  (`trust_pattern_denied`), and resolve the pending future as `approved`
+  after recording the agent-scoped grant
 - **JSON parse error handling**: All `request.json()` calls wrapped in try/except
 
 ## Persistence
@@ -128,7 +153,7 @@ restored as `done` and relaunched with fresh sessions.
 | POST | `/api/channels/{id}/agents` | Add agent (429 if limit) |
 | PATCH | `/api/channels/{id}/agents/{aid}` | Update agent (listen mode) |
 | DELETE | `/api/channels/{id}/agents/{aid}` | Dismiss agent |
-| POST | `/api/channels/{id}/agents/{aid}/approve` | Approve/reject/trust tool call |
+| POST | `/api/channels/{id}/agents/{aid}/approve` | Approve/reject/trust tool call (`trust_command`/`trust_base` take a `pattern`) |
 | GET | `/api/channels/presets` | List team presets |
 
 ## Files

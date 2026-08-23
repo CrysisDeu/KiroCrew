@@ -4,8 +4,12 @@ import ToolInputPreview from './ToolInputPreview'
 import TrustDropdown from './TrustDropdown'
 
 import { i18nT } from '../i18n/t'
-export default function ApprovalCard({ title, toolInput, showButtons, showTrust = true, onApprove }: {
+export default function ApprovalCard({ title, toolInput, showButtons, showTrust = true, shellOnlyTrustTiers = false, onApprove }: {
   title: string; toolInput: string; showButtons: boolean; showTrust?: boolean
+  /** When true, the per-command trust tiers render only for shell commands.
+   *  Channel cards set this: their backend refuses per-command grants for
+   *  non-shell tools (pattern_underivable), so the doomed tiers are hidden. */
+  shellOnlyTrustTiers?: boolean
   onApprove: (decision: string, pattern?: string) => void
 }) {
   const [decided, setDecided] = useState<string | null>(null)
@@ -15,6 +19,12 @@ export default function ApprovalCard({ title, toolInput, showButtons, showTrust 
   const isShell = title.startsWith('Running: ')
   const normalized = title.replace(/^(Running: |Reading )/, '')
   const baseCmd = normalized.split(/\s+/)[0] || normalized
+  // Shell-only surfaces also hide the per-command tiers when the tool input
+  // carries a redaction marker: the backend refuses to scope a grant to a
+  // redacted command (two commands differing only in credentials redact to
+  // the same text), so offering the tiers would be the always-fails pattern
+  // this card exists to avoid.
+  const perCommandTiers = !shellOnlyTrustTiers || (isShell && !/\[REDACTED/.test(toolInput))
   // The showButtons branch renders its own i18n "Running:" label, so a shell
   // title (which carries the "Running: " prefix) must be de-prefixed there to
   // avoid "Running: Running: …". The wrench branch renders no label, so the
@@ -32,7 +42,7 @@ export default function ApprovalCard({ title, toolInput, showButtons, showTrust 
       {showButtons && !decided && (
         <div className="mt-1.5 flex gap-1.5 flex-wrap">
           <button className={btnClass} onClick={() => handle('approved')}><CheckCircle className="lucide-inline" /> {i18nT('components.approvalCard.approve')}</button>
-          {showTrust && <TrustDropdown fullCommand={normalized} baseCommand={baseCmd} isShell={isShell} className={btnClass} onAction={(action, pattern) => handle(action, pattern)} />}
+          {showTrust && <TrustDropdown fullCommand={normalized} baseCommand={baseCmd} isShell={isShell} perCommandTiers={perCommandTiers} className={btnClass} onAction={(action, pattern) => handle(action, pattern)} />}
           <button className={btnClass + ' hover:!text-danger hover:!border-danger'} onClick={() => handle('rejected')}><Ban className="lucide-inline" /> {i18nT('components.approvalCard.reject')}</button>
         </div>
       )}
