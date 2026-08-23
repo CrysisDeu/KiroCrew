@@ -2406,6 +2406,26 @@ class TestInitAutonudge:
 class TestAutoApplyUpdateGitPath:
     """Git-based auto-update (non-toolbox)."""
 
+    @pytest.fixture(autouse=True)
+    def _permit_update_preconditions(self):
+        """Neutralize the two seam preconditions so these tests keep their subject.
+
+        `_auto_apply_update` refuses outright when the checkout declares a
+        repo-named git driver, or when the branch does not track the remote it
+        resets to. Both read the REAL git metadata of ``KIROCREW_PROJECT_DIR``,
+        which these tests point at a path that is not a repo — so without this
+        they would all pass vacuously by refusing before reaching the fetch/reset
+        sequence they exist to cover. The refusals have their own tests in
+        ``TestAutoApplyUpdatePreconditions``.
+        """
+        with patch(
+            "kiro_crew.platform.update_governance.repo_exec_config_reason",
+            return_value="",
+        ), patch(
+            "kiro_crew.platform.update_governance.tracks_upstream", return_value=True
+        ):
+            yield
+
     @pytest.mark.asyncio
     async def test_fetch_fails_returns_early(self):
         orch = _make_orchestrator()
@@ -3304,6 +3324,26 @@ class TestHeartbeatCallback:
 class TestAutoApplyUpdateVenvPath:
     """Venv-based auto-update (pip install -e .)."""
 
+    @pytest.fixture(autouse=True)
+    def _permit_update_preconditions(self):
+        """Neutralize the two seam preconditions so these tests keep their subject.
+
+        `_auto_apply_update` refuses outright when the checkout declares a
+        repo-named git driver, or when the branch does not track the remote it
+        resets to. Both read the REAL git metadata of ``KIROCREW_PROJECT_DIR``,
+        which these tests point at a path that is not a repo — so without this
+        they would all pass vacuously by refusing before reaching the fetch/reset
+        sequence they exist to cover. The refusals have their own tests in
+        ``TestAutoApplyUpdatePreconditions``.
+        """
+        with patch(
+            "kiro_crew.platform.update_governance.repo_exec_config_reason",
+            return_value="",
+        ), patch(
+            "kiro_crew.platform.update_governance.tracks_upstream", return_value=True
+        ):
+            yield
+
     @pytest.mark.asyncio
     async def test_venv_update_full_path(self):
         """Full venv update: fetch, diff, reset, pip install, restart."""
@@ -3900,6 +3940,26 @@ class TestReembedSweepDefersTheModelLoad:
 
 class TestAutoApplyUpdateResetPath:
     """Public auto-update reset path: discards local edits, builds frontend, pips."""
+
+    @pytest.fixture(autouse=True)
+    def _permit_update_preconditions(self):
+        """Neutralize the two seam preconditions so these tests keep their subject.
+
+        `_auto_apply_update` refuses outright when the checkout declares a
+        repo-named git driver, or when the branch does not track the remote it
+        resets to. Both read the REAL git metadata of ``KIROCREW_PROJECT_DIR``,
+        which these tests point at a path that is not a repo — so without this
+        they would all pass vacuously by refusing before reaching the fetch/reset
+        sequence they exist to cover. The refusals have their own tests in
+        ``TestAutoApplyUpdatePreconditions``.
+        """
+        with patch(
+            "kiro_crew.platform.update_governance.repo_exec_config_reason",
+            return_value="",
+        ), patch(
+            "kiro_crew.platform.update_governance.tracks_upstream", return_value=True
+        ):
+            yield
 
     @pytest.mark.asyncio
     async def test_reset_then_frontend_then_pip(self):
@@ -7376,3 +7436,86 @@ class TestChannelSkipReasonAtTransportStart:
         with caplog.at_level(logging.WARNING):
             await self._start(orch, monkeypatch)
         assert self._channel_records(caplog) == []
+
+
+class TestAutoApplyUpdatePreconditions:
+    """The two refusals guarding the unattended reset, at the gateway level.
+
+    The seam functions have their own unit tests; these assert the gateway
+    actually HONOURS them — that it returns before spawning anything, rather than
+    computing a refusal and proceeding anyway.
+    """
+
+    @pytest.mark.asyncio
+    async def test_repo_declared_driver_refuses_before_running_a_driver(self):
+        """A repo-named filter/textconv driver would be run BY these git commands.
+
+        `-c` cannot pin an arbitrary driver name, so the run is refused. What must
+        be proven is that the refusal lands before the commands that would EXECUTE
+        such a driver — `status`, `diff` and `reset`. The branch probe ahead of it
+        is a pure ref read that runs no driver, and it carries the neutralizer env
+        regardless.
+        """
+        orch = _make_orchestrator()
+        orch.dashboard_state = _mock_dashboard_state()
+
+        argvs = []
+
+        async def _fake_exec(*args, **kwargs):
+            argvs.append(args)
+            proc = AsyncMock()
+            proc.kill = MagicMock()
+            proc.returncode = 0
+            proc.communicate = AsyncMock(return_value=(b"main\n", b""))
+            proc.wait = AsyncMock(return_value=0)
+            return proc
+
+        with patch.dict("os.environ", {"KIROCREW_PROJECT_DIR": "/tmp/proj"}), patch(
+            "asyncio.create_subprocess_exec", side_effect=_fake_exec
+        ), patch(
+            "kiro_crew.platform.update_governance.repo_exec_config_reason",
+            return_value="repository declares filter.evil.smudge",
+        ), patch(
+            "kiro_crew.platform.update_governance.is_primary_branch", return_value=True
+        ), patch(
+            "kiro_crew.platform.update_governance.tracks_upstream", return_value=True
+        ):
+            await orch._auto_apply_update()
+
+        for forbidden in ("status", "diff", "reset", "fetch"):
+            assert not any(forbidden in a for a in argvs), (forbidden, argvs)
+
+    @pytest.mark.asyncio
+    async def test_branch_not_tracking_origin_refuses_before_fetch(self):
+        """The check measures `@{u}`; the apply resets `origin/<branch>`.
+
+        When they are different remotes the reset would discard commits, so the
+        apply stops. Only the branch probe may have run by then — nothing that
+        fetches or writes.
+        """
+        orch = _make_orchestrator()
+        orch.dashboard_state = _mock_dashboard_state()
+
+        argvs = []
+
+        async def _fake_exec(*args, **kwargs):
+            argvs.append(args)
+            proc = AsyncMock()
+            proc.kill = MagicMock()
+            proc.returncode = 0
+            proc.communicate = AsyncMock(return_value=(b"main\n", b""))
+            proc.wait = AsyncMock(return_value=0)
+            return proc
+
+        with patch.dict("os.environ", {"KIROCREW_PROJECT_DIR": "/tmp/proj"}), patch(
+            "asyncio.create_subprocess_exec", side_effect=_fake_exec
+        ), patch(
+            "kiro_crew.platform.update_governance.repo_exec_config_reason",
+            return_value="",
+        ), patch(
+            "kiro_crew.platform.update_governance.tracks_upstream", return_value=False
+        ):
+            await orch._auto_apply_update()
+
+        assert not any("fetch" in a for a in argvs), argvs
+        assert not any("reset" in a for a in argvs), argvs

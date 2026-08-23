@@ -8517,6 +8517,27 @@ class GatewayOrchestrator:
         if not proj:
             return
         try:
+            from kiro_crew.platform.update_governance import (
+                git_neutralizer_env,
+                is_primary_branch,
+                repo_exec_config_reason,
+                resolve_remote_url,
+                tracks_upstream,
+                update_blocked_reason,
+            )
+
+            # Every git call below reads a tree an agent can write, and several of
+            # them (`status`, `diff`, `reset`) will EXEC a program the repository
+            # names in its own config. Bound once here, ahead of the first spawn,
+            # so the whole sequence is covered and a later-added command cannot
+            # quietly opt out of it.
+            #
+            # A redirected work tree is handled separately, by the
+            # `repo_exec_config_reason` refusal below: git ignores a
+            # `core.worktree` supplied through the environment, so it cannot be
+            # pinned here.
+            _git_env = {**os.environ, **git_neutralizer_env()}
+
             # Detect current branch
             branch_proc = await asyncio.create_subprocess_exec(
                 "git",
@@ -8524,6 +8545,7 @@ class GatewayOrchestrator:
                 "--abbrev-ref",
                 "HEAD",
                 cwd=proj,
+                env=_git_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -8532,22 +8554,64 @@ class GatewayOrchestrator:
                 logger.error("Auto-update: could not determine current branch")
                 return
             branch = branch_out.strip().decode() if branch_out else ""
-            if not branch or branch == "HEAD":
-                branch = "mainline"
 
-            # Only auto-update on mainline — beta/feature branches need manual update
-            if branch != "mainline":
-                logger.debug("Auto-update: skipping — on branch %s, not mainline", branch)
+            # Only a PRIMARY branch is auto-updated: a feature or beta branch
+            # needs a deliberate `kirocrew update`, and a detached HEAD has no
+            # branch to fast-forward at all.
+            #
+            # This gate read `branch != "mainline"` — inherited verbatim from the
+            # internal repo whose primary line is named that — so on this repo,
+            # whose primary line is `main`, it matched nothing and returned at
+            # `logger.debug`. Every git checkout (the documented `install.sh`
+            # path) therefore never auto-updated, and said so nowhere.
+            #
+            # `is_primary_branch` reads a reviewed allowlist and nothing else, so
+            # no local git ref can steer or veto this decision. See its docstring
+            # — this is also the path a mandatory `min_version` floor drives.
+            if not is_primary_branch(branch):
+                logger.info(
+                    "Auto-update: skipping — %s is not a primary branch",
+                    branch or "detached HEAD",
+                )
+                return
+
+            # A content filter or textconv driver is named BY THE REPOSITORY, so
+            # there is no fixed key to pin and `_git_env` cannot reach it. Refuse
+            # the unattended run rather than execute it; the operator still has
+            # `kirocrew update`, where a human is deciding.
+            exec_config = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: repo_exec_config_reason(proj)
+            )
+            if exec_config:
+                logger.warning(
+                    "Auto-update refused: %s, which git would run during the update",
+                    exec_config,
+                )
+                if self.dashboard_state:
+                    self.dashboard_state.push_refresh("update_available")
+                return
+
+            # The availability check compares HEAD against `@{u}` (the TRACKED
+            # upstream) while this applies `origin/<branch>`. On a fork checkout
+            # whose branch tracks `upstream` and whose `origin` is a stale fork,
+            # those are different refs: the check sees the canonical remote move
+            # ahead and the reset below would discard commits. Only reset when the
+            # branch tracks the remote this actually fetches and pins.
+            if not await asyncio.get_running_loop().run_in_executor(
+                None, lambda: tracks_upstream(proj, branch)
+            ):
+                logger.info(
+                    "Auto-update: skipping — %s does not track origin, and the "
+                    "update check measures against its tracked upstream",
+                    branch,
+                )
+                if self.dashboard_state:
+                    self.dashboard_state.push_refresh("update_available")
                 return
 
             # Source pin, checked before the fetch. This is the most privileged
             # update path in the product — no auth, no click, `git reset --hard`
             # + pip + execv on boot — so a blocked host must not touch its tree.
-            from kiro_crew.platform.update_governance import (
-                resolve_remote_url,
-                update_blocked_reason,
-            )
-
             blocked = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: update_blocked_reason(resolve_remote_url(proj, remote="origin"))
             )
@@ -8566,6 +8630,7 @@ class GatewayOrchestrator:
                 "origin",
                 branch,
                 cwd=proj,
+                env=_git_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -8584,6 +8649,7 @@ class GatewayOrchestrator:
                 f"origin/{branch}",
                 "--quiet",
                 cwd=proj,
+                env=_git_env,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -8600,6 +8666,7 @@ class GatewayOrchestrator:
                 "status",
                 "--porcelain",
                 cwd=proj,
+                env=_git_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -8621,6 +8688,7 @@ class GatewayOrchestrator:
                 "--hard",
                 f"origin/{branch}",
                 cwd=proj,
+                env=_git_env,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
