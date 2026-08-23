@@ -187,6 +187,91 @@ than through the shared gate, so real functionality is unaffected.
 Each leaf is registered under every known data-home prefix, so a not-yet-migrated
 legacy home is fenced identically to the current `~/.kiro/crew`.
 
+#### The container the leaves sit in
+
+Every leaf above is identified by its **path**, which silently assumes the directory
+holding it stays where it is. It did not. `rm -rf ~/.kiro/crew` was already refused,
+but relocation was not, so
+
+```
+mv ~/.kiro/crew /tmp/stash && ln -s /tmp/evil ~/.kiro/crew
+```
+
+left every fence naming a file that is no longer there, and the next write to
+`security_policy.json`, `profiles/`, `admission_policy.json` or `computer_use.json`
+followed the link. A bypass of the ceiling itself, not of one feature.
+
+`is_unreplaceable_container` closes it. Two properties are load-bearing:
+
+- **Exact, not prefix.** The leaf matcher is prefix-based, so adding the data home to
+  `_SENSITIVE_HOME_DIRS` would fence `sessions/`, `memory/`, `skills/` and `logs/`
+  and cut the agent off from its own working data. Only the container itself is
+  refused; everything under it stays as reachable as it is today.
+- **Verb-independent**, for the reason the leaf fence gives — an enumerated
+  write-verb allowlist is bypassable (`mv`, `ln`, `cp`, `rsync`, a novel verb, a
+  Python `os.rename`), so the refusal is on *naming* the container. `cd`/`pushd` are
+  the one carve-out: entering a directory cannot relocate it, and
+  `_GENERAL_PURPOSE_PARENT_DIRS` already excludes `.kiro` from parent-tainting to
+  avoid exactly that false positive. A spent `cd` does not launder a later mention.
+
+**Shell expansion is normalized before either gate matches.** Bash expands an operand
+before the command runs and the matcher did not, so `~/.kiro/cr{e..e}w` arrived as a
+literal matching no protected path and reached bash as `~/.kiro/crew`. This was never
+specific to the container gate — the **leaf** gate had the identical hole, so
+`cat ~/.kiro/cr{e..e}w/security_policy.json` read the trust root. Brace expansion
+therefore lands in the shared candidate generator, where both gates inherit it, and a
+glob carrying `*`/`?`/`[…]` is refused when it *could* name a protected path, since a
+gate cannot resolve one without the filesystem.
+
+The expander models bash, and four divergences from it were each a bypass: a
+**descending** range (`{w..e}`) produced an empty span where bash produces `crew`; an
+**oversized** brace was truncated, dropping the tail so a 65-item list with `crew` last
+expanded to `crew` in bash and to everything-but-`crew` here (it now fails closed); a
+**shadowed** `cd` (`cd(){ mv "$1" /tmp; }`) inherited the navigation carve-out, so
+defining or aliasing one of those verbs now withdraws it; and a **custom
+`KIROCREW_HOME`** was invisible to the raw scan, which is the only layer that sees an
+interpreter payload — the configured root is now its own branch, and the compiled
+pattern is cached per value rather than pinned at first call.
+
+None of that makes the matcher a shell parser, and it is not meant to: the floor under
+it is the sandbox hide list above, which a shadowed builtin or a runtime-assembled
+payload cannot reach past.
+
+Glob matching is **component-wise**, not `fnmatch` over the whole path: `fnmatch`'s `*`
+crosses `/`, which denied a bare `ls *`, and it ignores the dotfile rule, which matched
+`~/*` against `~/.kiro`. Bash's rules are what keep an ordinary home listing out of the
+gate while `ls ~/.kiro/*`, which names the container, stays refused. Expansion is
+bounded — past the cap the token is left unexpanded and the metacharacter arm still
+refuses it.
+
+It runs in all three passes — raw regex, normalizer, and the `cd`-resolved segment
+walk — because the gate beside it does. Wired into only one, it missed the
+`cd`-relative, variable, and interpreter-payload forms the leaf gate had caught for
+a long time; `TestItIsNoWeakerThanTheLeafGateBesideIt` asserts that parity
+form-by-form so the two cannot drift apart again.
+
+#### A subprocess is not constrained by a command gate
+
+The command gate reads command **text**. `./script.sh`, `make install` and `npm run
+build` are each one opaque token to it, and whatever they write internally is never
+inspected — so the path fence refuses
+`echo x > ~/.kiro/crew/security_policy.json` and says nothing about a script
+containing that exact line. The fence was never the layer that stopped a subprocess.
+
+The sandbox's hide lists are. `security_policy.json`, `admission_policy.json`,
+`computer_use.json`, `profiles/` and the variable store are hidden from the agent
+subprocess tree in **every** mode, the way `.vault` and `.env` already were — a
+protection that applied only in strict mode would be absent on the default. Hiding
+rather than merely denying is safe because nothing in the subprocess needs to read
+them: variable expansion happens in the gateway before the prompt is built, and the
+ceiling is deliberately not the agent's to read.
+
+The two halves live in different modules with no shared symbol — `security.py` names
+the fenced leaves, `sandbox.py` names what is hidden — so a leaf added to one and not
+the other is protected only against the spelling nobody uses.
+`TestTheFencedPathsAreHiddenFromSubprocesses` asserts the coupling rather than either
+list.
+
 **Do not weaken this when editing the path or bash matchers.** Write and extract
 verbs must stay covered: a bash command that merely *names* a write-protected
 leaf is refused, verb-independently, because an enumerated write-verb allowlist is

@@ -84,6 +84,23 @@ _STRICT_DIRS: list[str] = [
     # ``.vault/.vault_key`` and decrypt the store.
     ".kiro/crew/.vault",
     ".kirocrew/.vault",
+    # The governance trust root and the variable store, hidden in every mode for the
+    # same reason the vault is.
+    #
+    # `security.py` already refuses a bash command that NAMES one of these, but that
+    # gate reads command TEXT: an approved `./script`, `make install` or `npm run
+    # build` is one opaque token to it, and whatever the script writes internally is
+    # never inspected. The path fence stops `echo x > .../security_policy.json` and
+    # does nothing about a script containing that same line. Hiding the paths from the
+    # subprocess tree is the layer that does not depend on the write being spelled out.
+    #
+    # Safe to hide rather than merely deny: nothing in the agent subprocess needs to
+    # read either one. Variable expansion happens in the gateway before the prompt is
+    # built, and the ceiling is deliberately not the agent's to read.
+    ".kiro/crew/variables",
+    ".kirocrew/variables",
+    ".kiro/crew/profiles",
+    ".kirocrew/profiles",
 ]
 
 _STANDARD_DIRS: list[str] = [
@@ -96,6 +113,23 @@ _STANDARD_DIRS: list[str] = [
     # Secret vault — hidden in every mode (see _STRICT_DIRS note above).
     ".kiro/crew/.vault",
     ".kirocrew/.vault",
+    # The governance trust root and the variable store, hidden in every mode for the
+    # same reason the vault is.
+    #
+    # `security.py` already refuses a bash command that NAMES one of these, but that
+    # gate reads command TEXT: an approved `./script`, `make install` or `npm run
+    # build` is one opaque token to it, and whatever the script writes internally is
+    # never inspected. The path fence stops `echo x > .../security_policy.json` and
+    # does nothing about a script containing that same line. Hiding the paths from the
+    # subprocess tree is the layer that does not depend on the write being spelled out.
+    #
+    # Safe to hide rather than merely deny: nothing in the agent subprocess needs to
+    # read either one. Variable expansion happens in the gateway before the prompt is
+    # built, and the ceiling is deliberately not the agent's to read.
+    ".kiro/crew/variables",
+    ".kirocrew/variables",
+    ".kiro/crew/profiles",
+    ".kirocrew/profiles",
 ]
 
 # CC mode: hides all credential dirs including .aws, but selectively exposes
@@ -113,6 +147,23 @@ _CC_DIRS: list[str] = [
     # Secret vault — hidden in every mode (see _STRICT_DIRS note above).
     ".kiro/crew/.vault",
     ".kirocrew/.vault",
+    # The governance trust root and the variable store, hidden in every mode for the
+    # same reason the vault is.
+    #
+    # `security.py` already refuses a bash command that NAMES one of these, but that
+    # gate reads command TEXT: an approved `./script`, `make install` or `npm run
+    # build` is one opaque token to it, and whatever the script writes internally is
+    # never inspected. The path fence stops `echo x > .../security_policy.json` and
+    # does nothing about a script containing that same line. Hiding the paths from the
+    # subprocess tree is the layer that does not depend on the write being spelled out.
+    #
+    # Safe to hide rather than merely deny: nothing in the agent subprocess needs to
+    # read either one. Variable expansion happens in the gateway before the prompt is
+    # built, and the ceiling is deliberately not the agent's to read.
+    ".kiro/crew/variables",
+    ".kirocrew/variables",
+    ".kiro/crew/profiles",
+    ".kirocrew/profiles",
 ]
 
 # CC mode: files to expose read-only inside otherwise-hidden dirs.
@@ -133,6 +184,22 @@ _CC_FILES: list[str] = [
     # kept covered too (a not-yet-migrated box still holds real secret bytes).
     ".kiro/crew/.env",
     ".kirocrew/.env",
+    # Keystone leaves that are FILES, so the directory entries above do not reach them.
+    ".kiro/crew/security_policy.json",
+    ".kirocrew/security_policy.json",
+    ".kiro/crew/admission_policy.json",
+    ".kirocrew/admission_policy.json",
+    ".kiro/crew/computer_use.json",
+    ".kirocrew/computer_use.json",
+    # Records that PERSIST an operator-authorship decision. The path fence refuses an
+    # agent TOOL call naming these, which is the tool-mediated half; a subprocess never
+    # goes through that gate, so without hiding them a script can write
+    # `"operator_authored": true` into a job and wait for the reload. Same two halves
+    # as the trust root above, for the same reason.
+    ".kiro/crew/cron.json",
+    ".kirocrew/cron.json",
+    ".kiro/crew/autonudge.json",
+    ".kirocrew/autonudge.json",
 ]
 
 

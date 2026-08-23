@@ -6196,6 +6196,11 @@ def is_sensitive_bash_command(command: str) -> str | None:
         return "Blocked: command accesses sensitive credential path"
     if _EXTRACT_INTO_TRUST_ROOT_RE.search(command):
         return "Blocked: command extracts into the governance trust-root directory"
+    if _names_unreplaceable_container_raw(command):
+        return (
+            "Blocked: command names the directory holding the governance trust root, "
+            "which must not be replaced"
+        )
     # Block ANY command referencing a sensitive path via relative traversal,
     # regardless of verb.  The home-anchored/absolute forms are already caught
     # by the matcher above; this covers the relative-traversal forms that escape
@@ -6800,6 +6805,205 @@ def _unresolved_home_hypothesis(token: str) -> str | None:
 #: content (`~/.config/starship.toml`, `~/.docker/daemon.json`, `~/.kube/cache/`),
 #: so tainting a `cd` into them produces false positives.  Exclude them from the
 #: parent set; their sensitive CHILDREN are still protected by `is_sensitive_path`.
+#: Directories that CONTAIN the fenced leaves, protected against being replaced
+#: rather than against being read.
+#:
+#: The leaf fence is prefix-matched, which is what makes it useless here: adding a
+#: data home to `_SENSITIVE_HOME_DIRS` would fence `sessions/`, `memory/`, `skills/`
+#: and `logs/` along with it and cut the agent off from its own working data. So these
+#: are matched EXACTLY -- naming a path inside one stays as legal as it is today, and
+#: only naming the container itself is refused.
+#:
+#: Why the container needs protecting at all: every fenced leaf is identified by its
+#: PATH, so an agent that relocates the directory holding them makes each fence name a
+#: file that is no longer there. `mv ~/.kiro/crew /tmp/stash && ln -s /tmp/evil
+#: ~/.kiro/crew` passed both gates -- `rm -rf ~/.kiro/crew` was already refused, but
+#: relocation was not -- and the next write to `security_policy.json`, `profiles/`,
+#: `admission_policy.json` or `computer_use.json` followed the link. That is the
+#: keystone, so this closes a bypass of the whole ceiling and not of one feature.
+#:
+#: Refused verb-independently, for the reason the leaf fence gives: an enumerated
+#: write-verb allowlist is bypassable (`mv`, `ln`, `cp`, `rsync`, a novel verb, a
+#: Python `os.rename`), so the refusal is on NAMING the container, not on the verb.
+#: `~` is deliberately absent -- protecting the home directory itself would taint
+#: `cd ~`, and an agent that can replace `$HOME` has already won by other means.
+#: Verbs whose operand is a directory to ENTER, not a directory to move. `cd` into a
+#: container is already sanctioned -- `_GENERAL_PURPOSE_PARENT_DIRS` excludes `.kiro`
+#: from parent-tainting for exactly this reason -- and entering a directory cannot
+#: replace it, so refusing it would be a false positive with no threat behind it.
+#:
+#: This is NOT the enumerated write-verb allowlist the leaf fence warns against. That
+#: warning is about listing the verbs that DO harm, which is unbounded; this lists the
+#: two that provably cannot, and everything not named here is still refused.
+_CONTAINER_NAVIGATION_VERBS: frozenset[str] = frozenset({"cd", "pushd"})
+
+#: A function definition or alias for one of the navigation verbs. Either means the
+#: name no longer denotes the builtin, so the carve-out that trusts the name is void.
+_DEFINES_OR_ALIASES_A_VERB_RE = re.compile(
+    r"(?:^|[;&|]|\bfunction\s+)\s*(?:cd|pushd)\s*(?:\(\s*\)|\{)"
+    r"|\balias\s+(?:cd|pushd)\s*=",
+    re.IGNORECASE,
+)
+
+_UNREPLACEABLE_CONTAINER_DIRS: frozenset[str] = frozenset(
+    {
+        ".kiro/crew",
+        ".kiro",
+        # Fully deprecated as a data home and never migrated to, but it stays here for
+        # the same reason it stays in the leaf fence: an installation that still has
+        # one must not have it swapped out from under the files inside.
+        ".kirocrew",
+    }
+)
+
+
+_CONTAINER_RE: "re.Pattern[str] | None" = None
+_CONTAINER_RE_KEY: str | None = None
+
+
+def _build_container_regex() -> "re.Pattern[str]":
+    """Raw-text matcher for the container dirs, parallel to :func:`_build_sensitive_regex`.
+
+    Needed for the same reason that one is: an embedded interpreter payload
+    (``python -c "os.rename('~/.kiro/crew', ...)"``) never tokenizes into a shell
+    operand, so the normalizer passes cannot see it and only a scan of the raw command
+    text can. Without this the container gate was strictly weaker than the leaf gate
+    beside it, which is the bar it has to meet.
+
+    Terminator differs from the leaf pattern on purpose: that one accepts a trailing
+    ``/`` so a deeper path still matches, which is exactly the prefix behaviour this
+    gate must not have. Here the path may end in an optional ``/`` and must then STOP,
+    so ``~/.kiro/crew`` matches and ``~/.kiro/crew/sessions`` does not.
+    """
+    home = re.escape(os.path.expanduser("~"))
+    tilde = "~"
+    home_var = r"\$HOME|\$\{HOME\}"
+    generic_home = r"/home/[^/\s]+|/Users/[^/\s]+"
+    alts = [home, tilde, home_var, generic_home]
+    # `KIROCREW_HOME` relocates the data home wholesale, and an interpreter payload
+    # never tokenizes -- so for a custom home the raw scan is the ONLY layer that can
+    # see it, and anchoring solely on `~` left it invisible. The configured root is
+    # matched as an alternative, and as its own container: with `KIROCREW_HOME` set,
+    # that directory IS the thing being protected, not a parent of it.
+    home_alts = "(?:" + "|".join(alts) + ")"
+    # Longest first: `.kiro` would otherwise win the alternation against `.kiro/crew`
+    # and then fail the terminator, so the longer spelling would never be tried.
+    dirs = sorted(_UNREPLACEABLE_CONTAINER_DIRS, key=len, reverse=True)
+    dirs_pattern = "|".join(re.escape(d) for d in dirs)
+    # Closers admit the interpreter-payload context: quote, comma, paren.
+    branches = [rf"{home_alts}/(?:{dirs_pattern})"]
+    # With `KIROCREW_HOME` set, that directory IS the container -- there is no
+    # `.kiro/crew` suffix beneath it -- so it is its own branch rather than another
+    # home prefix. Anchoring only on `~` left a custom home invisible to the raw scan,
+    # which is the ONLY layer that sees an interpreter payload.
+    configured = os.environ.get("KIROCREW_HOME", "").strip()
+    if configured:
+        root = os.path.abspath(os.path.expanduser(configured)).rstrip("/")
+        if root and root != "/":
+            branches.append(re.escape(root))
+    return re.compile(
+        "(?:" + "|".join(branches) + r")/?(?=\s|$|['\",)])",
+        re.IGNORECASE,
+    )
+
+
+def _get_container_re() -> "re.Pattern[str]":
+    """Cached per ``KIROCREW_HOME``, because the pattern now depends on it.
+
+    A plain module-level cache would pin whatever the value was at first call. Tests
+    pin ``KIROCREW_HOME`` per test, so one built under a previous test's home would be
+    silently reused -- and the failure direction is permissive.
+    """
+    global _CONTAINER_RE, _CONTAINER_RE_KEY
+    key = os.environ.get("KIROCREW_HOME", "")
+    if _CONTAINER_RE is None or _CONTAINER_RE_KEY != key:
+        _CONTAINER_RE = _build_container_regex()
+        _CONTAINER_RE_KEY = key
+    return _CONTAINER_RE
+
+
+def _names_unreplaceable_container_raw(command: str) -> bool:
+    """Does the RAW *command* name a container outside a navigation operand?
+
+    The preceding token is inspected rather than using a lookbehind, so a quoted
+    operand (``cd "~/.kiro"``) is still recognised as navigation.
+    """
+    for match in _get_container_re().finditer(command):
+        prefix = command[: match.start()].rstrip()
+        # Strip an opening quote the operand may carry.
+        prefix = prefix.rstrip("\"'")
+        previous = prefix.rsplit(None, 1)[-1] if prefix.split() else ""
+        if previous.strip("\"'").casefold() in _CONTAINER_NAVIGATION_VERBS:
+            continue
+        return True
+    return False
+
+
+def _is_navigation_operand(command: str, candidate: str) -> bool:
+    """Does *candidate* appear in *command* only as the operand of `cd`/`pushd`?
+
+    Deliberately conservative: ANY other occurrence of the token disqualifies it, so
+    `cd ~/.kiro/crew && mv ~/.kiro/crew /tmp/x` is still refused on the second mention
+    rather than excused by the first.
+    """
+    tokens = command.split()
+    if not tokens:
+        return False
+    # A shell FUNCTION can shadow `cd`: `cd(){ mv "$1" /tmp/stash; }; cd ~/.kiro/crew`
+    # reads as navigation here and relocates the container in bash. The carve-out
+    # exists to spare an ordinary `cd`, and an ordinary `cd` does not appear in a
+    # command that also defines a function or aliases one -- so the presence of either
+    # withdraws it. Narrowed rather than removed, because removing it refuses `cd
+    # ~/.kiro`, which `_GENERAL_PURPOSE_PARENT_DIRS` deliberately allows.
+    #
+    # This layer is best-effort by construction -- the command gate is a matcher, not a
+    # bash parser (see the module note on that) -- and the floor under it is the
+    # sandbox hide list, which a shadowed builtin cannot reach past.
+    if _DEFINES_OR_ALIASES_A_VERB_RE.search(command):
+        return False
+    tail = os.path.basename(candidate.rstrip(os.sep)).casefold()
+    saw_any = False
+    for index, token in enumerate(tokens):
+        bare = token.strip("\"'").rstrip(os.sep)
+        if os.path.basename(bare).casefold() != tail:
+            continue
+        saw_any = True
+        prev = tokens[index - 1].strip("\"'").casefold() if index else ""
+        if prev not in _CONTAINER_NAVIGATION_VERBS:
+            return False
+    return saw_any
+
+
+def is_unreplaceable_container(path_str: str, base_dir: str | None = None) -> bool:
+    """Is *path_str* EXACTLY one of the directories holding the fenced leaves?
+
+    Shares :func:`_candidate_forms` and :func:`_home_dir_targets` with
+    :func:`_path_in_home_dirs` so the symlink and casefold hardening cannot drift
+    between this gate and the leaf gate. The ONE difference is deliberate: the
+    comparison is exact, with no ``startswith`` arm. A prefix match here would fence
+    everything under the data home -- `sessions/`, `memory/`, `skills/`, `logs/` --
+    and cut the agent off from its own working data, which is why the container
+    cannot simply be added to ``_SENSITIVE_HOME_DIRS``.
+
+    Checking every candidate form, rather than only the resolved one, is what makes
+    this hold AFTER a swap has happened: once the container is a symlink, the
+    resolved form names the attacker's target instead, and only the lexical form
+    still names the container.
+    """
+    if not path_str:
+        return False
+    if _BRACE_OVERFLOW_SENTINEL in path_str:
+        return True  # too many alternatives to enumerate; assume the worst
+    candidates = _candidate_forms(path_str, base_dir)
+    targets = _home_dir_targets(sorted(_UNREPLACEABLE_CONTAINER_DIRS))
+    for cand in candidates:
+        cand_cf = cand.casefold().rstrip(os.sep)
+        for target in targets:
+            if cand_cf == target.casefold().rstrip(os.sep):
+                return True
+    return False
+
+
 _GENERAL_PURPOSE_PARENT_DIRS: frozenset[str] = frozenset(
     {
         ".config",
@@ -6891,6 +7095,131 @@ def _sensitive_under_unresolved_var(token: str) -> bool:
     return False
 
 
+#: Ceiling on brace-expansion fan-out. `{a..z}{a..z}{a..z}` is 17,576 strings and a
+#: gate is not the place to find that out; past this the token is left unexpanded and
+#: the metacharacter arm below still refuses anything that could name a protected path.
+_MAX_BRACE_EXPANSIONS = 64
+
+#: Stands in for a brace expression too large to enumerate. Refused wherever a real
+#: container path would be, so "too many alternatives to check" answers the same way as
+#: "names the container" rather than the same way as "names nothing".
+_BRACE_OVERFLOW_SENTINEL = "\x00brace-overflow"
+
+_BRACE_RANGE_RE = re.compile(r"\{(\w)\.\.(\w)\}")
+_BRACE_LIST_RE = re.compile(r"\{([^{}]*,[^{}]*)\}")
+
+
+def _expand_braces(token: str) -> list[str]:
+    """Expand `{a..c}` and `{a,b}` the way bash does, before the path gates see it.
+
+    The shell performs this expansion, the matcher did not, so `~/.kiro/cr{e..e}w`
+    reached the gate as a literal that matches no protected path and reached BASH as
+    `~/.kiro/crew`. That read the governance trust root.
+
+    Bounded rather than complete: the aim is to catch a spelling that resolves to a
+    protected path, not to reimplement the shell. What this cannot expand is refused
+    instead, by :func:`_glob_could_name`.
+    """
+    out = [token]
+    for _ in range(8):  # nesting depth; each pass expands the innermost braces
+        grown: list[str] = []
+        changed = False
+        for item in out:
+            match = _BRACE_RANGE_RE.search(item) or _BRACE_LIST_RE.search(item)
+            if not match:
+                grown.append(item)
+                continue
+            changed = True
+            if match.re is _BRACE_RANGE_RE:
+                start, end = match.group(1), match.group(2)
+                # Bash expands a DESCENDING range too: `{w..e}` is w,v,u,...,e. Walking
+                # only upward produced an EMPTY span, so `cr{w..e}w` yielded no
+                # candidates at all while bash produced `crew`.
+                if start.isdigit() and end.isdigit():
+                    lo, hi = int(start), int(end)
+                    step = 1 if hi >= lo else -1
+                    span = [str(n) for n in range(lo, hi + step, step)]
+                else:
+                    lo, hi = ord(start), ord(end)
+                    step = 1 if hi >= lo else -1
+                    span = [chr(c) for c in range(lo, hi + step, step)]
+            else:
+                span = match.group(1).split(",")
+            for piece in span:
+                grown.append(item[: match.start()] + piece + item[match.end() :])
+        out = grown
+        if len(out) > _MAX_BRACE_EXPANSIONS:
+            # FAIL CLOSED, not truncate. Truncating dropped the tail of the list, so a
+            # 65-item brace with `crew` last expanded to `crew` in bash and to
+            # everything-but-crew here. The sentinel is a path no candidate check can
+            # match and every container check refuses, so an over-large brace is
+            # treated as naming whatever it might have named.
+            return [_BRACE_OVERFLOW_SENTINEL]
+        if not changed:
+            break
+    return out
+
+
+def _glob_could_name(token: str, targets: "set[str]") -> bool:
+    """Could *token*, read as a glob, name any path in *targets*?
+
+    A gate cannot resolve `~/.kiro/*` without the filesystem and must not need to: the
+    safe answer for a pattern that COULD name a protected path is to refuse it.
+
+    Matched COMPONENT-WISE rather than with `fnmatch` over the whole string, because
+    `fnmatch` is not glob:
+
+    * its `*` crosses `/`, so a bare `ls *` matched every absolute target and denied an
+      ordinary listing;
+    * it ignores the dotfile rule, so `~/*` matched `~/.kiro` even though bash without
+      `dotglob` does not.
+
+    Only absolute or home-anchored tokens are considered at all -- a relative glob
+    resolves against the CWD, not against `$HOME`. The `cd`-relative case is covered
+    where the segment walk joins the operand onto its base and passes an absolute path.
+    """
+    if not any(ch in token for ch in "*?["):
+        return False
+    expanded = os.path.expanduser(os.path.expandvars(token))
+    if not os.path.isabs(expanded):
+        return False
+
+    def _components(value: str) -> "list[str]":
+        """Split on EITHER separator.
+
+        `_home_dir_targets` yields native paths, so on Windows a target is
+        backslash-separated while an operand typed by the agent may use either.
+        Splitting on "/" alone gave a single component there, the length check never
+        matched, and the whole glob arm silently passed everything -- a gate that is
+        green on macOS and absent on Windows.
+        """
+        return value.casefold().replace("\\", "/").rstrip("/").split("/")
+
+    parts = _components(expanded)
+    for target in targets:
+        t_parts = _components(target)
+        if len(parts) != len(t_parts):
+            continue
+        if all(_glob_component_matches(p, t) for p, t in zip(parts, t_parts)):
+            return True
+    return False
+
+
+def _glob_component_matches(pattern: str, component: str) -> bool:
+    """One path component against one glob component, with bash's dotfile rule.
+
+    A leading dot is matched only by a pattern that spells the dot literally, so
+    ``~/*`` does not name ``~/.kiro`` -- which is what bash does without ``dotglob``,
+    and what keeps an ordinary home listing out of this gate.
+    """
+    if component.startswith(".") and not pattern.startswith("."):
+        return False
+    try:
+        return re.fullmatch(fnmatch.translate(pattern)[4:-3], component) is not None
+    except re.error:
+        return pattern == component
+
+
 def _path_candidates(token: str) -> list[str]:
     """Every spelling of *token* that could name a path, for the operand checks.
 
@@ -6907,7 +7236,7 @@ def _path_candidates(token: str) -> list[str]:
       digits, then ``>``/``>>``/``<`` — is stripped so the path portion is what
       gets checked. A bare operator with nothing after it yields no candidate.
     """
-    candidates = [token]
+    candidates = _expand_braces(token)
     if "=" in token:
         value = token.split("=", 1)[1]
         if value:
@@ -7034,6 +7363,31 @@ def _check_sensitive_via_normalizer(command: str) -> str | None:
                     return (
                         "Blocked: command accesses sensitive credential path "
                         f"(resolved via normalizer: {cand[:80]})"
+                    )
+                # A glob cannot be resolved without the filesystem, so a pattern that
+                # COULD name a protected path is refused rather than guessed at.
+                if _glob_could_name(cand, _home_dir_targets(_SENSITIVE_HOME_DIRS)):
+                    return (
+                        "Blocked: command uses a pattern that can name a sensitive "
+                        f"credential path: {cand[:80]}"
+                    )
+                # Checked HERE rather than in the regex fast-path so it inherits the
+                # normalizer's work: quoting, `$HOME`/tilde expansion, relative
+                # traversal and variable resolution all land before the comparison,
+                # and an exact match against a raw token would miss every one of them.
+                if _glob_could_name(
+                    cand, _home_dir_targets(sorted(_UNREPLACEABLE_CONTAINER_DIRS))
+                ) and not _is_navigation_operand(source, cand):
+                    return (
+                        "Blocked: command uses a pattern that can name the directory "
+                        f"holding the governance trust root: {cand[:80]}"
+                    )
+                if is_unreplaceable_container(cand) and not _is_navigation_operand(
+                    source, cand
+                ):
+                    return (
+                        "Blocked: command names the directory holding the governance "
+                        f"trust root, which must not be replaced: {cand[:80]}"
                     )
                 if _sensitive_under_unresolved_var(cand):
                     return (
@@ -7270,6 +7624,13 @@ def _check_sensitive_via_normalizer(command: str) -> str | None:
                             "Blocked: command accesses sensitive credential path "
                             f"(resolved via normalizer: {cand[:80]})"
                         )
+                    if is_unreplaceable_container(cand) and not _is_navigation_operand(
+                        segment, cand
+                    ):
+                        return (
+                            "Blocked: command names the directory holding the governance "
+                            f"trust root, which must not be replaced: {cand[:80]}"
+                        )
 
                     # A relative operand — including a bare filename, which is not
                     # path-like on its own — resolves against the directory a
@@ -7280,6 +7641,18 @@ def _check_sensitive_via_normalizer(command: str) -> str | None:
                             if is_sensitive_path(candidate):
                                 return (
                                     "Blocked: command accesses sensitive credential path "
+                                    f"(resolved against 'cd' target: {candidate[:80]})"
+                                )
+                            # `cd ~/.kiro && mv crew /tmp/x` names the container only
+                            # after the join, and `cd ~/.kiro/crew && mv . /tmp/x` never
+                            # names it at all. The navigation carve-out is deliberately
+                            # NOT applied here: the `cd` that established this base is
+                            # already spent, so a second operand resolving onto the
+                            # container is being moved, not entered.
+                            if is_unreplaceable_container(candidate):
+                                return (
+                                    "Blocked: command names the directory holding the "
+                                    "governance trust root, which must not be replaced "
                                     f"(resolved against 'cd' target: {candidate[:80]})"
                                 )
 
