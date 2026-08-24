@@ -28,6 +28,8 @@ from kiro_crew.acp.client import (
     _resolve_vendored_claude_acp,
     _substitute_model_from_advisory,
     _vendored_claude_acp_roots,
+    format_command_result,
+    parse_slash_command,
 )
 from kiro_crew.acp.liveness import (
     VERDICT_DEAD,
@@ -5813,50 +5815,50 @@ class TestReadNewToolResultsSync:
 
 
 class TestFormatCommandResult:
-    """Tests for _format_command_result."""
+    """Tests for format_command_result."""
 
     def test_structured_data_with_message(self):
-        result = AcpClient._format_command_result({"data": {"key": "value"}, "message": "Done"})
+        result = format_command_result({"data": {"key": "value"}, "message": "Done"})
         assert "Done" in result
         assert "```json" in result
         assert '"key"' in result
 
     def test_structured_data_without_message(self):
-        result = AcpClient._format_command_result({"data": {"key": "val"}, "message": ""})
+        result = format_command_result({"data": {"key": "val"}, "message": ""})
         assert "```json" in result
         assert '"key"' in result
 
     def test_agent_model_filtered(self):
-        result = AcpClient._format_command_result(
+        result = format_command_result(
             {"data": {"agent": "x", "model": "y"}, "message": ""}
         )
         # Only agent/model → display is empty → falls through to message
         assert result == ""
 
     def test_message_only(self):
-        result = AcpClient._format_command_result({"message": "hello"})
+        result = format_command_result({"message": "hello"})
         assert result == "hello"
 
     def test_empty_result(self):
-        result = AcpClient._format_command_result({})
+        result = format_command_result({})
         assert result == ""
 
 
 class TestParseSlashCommand:
-    """Tests for _parse_slash_command."""
+    """Tests for parse_slash_command."""
 
     def test_simple_command(self):
-        name, args = AcpClient._parse_slash_command("/compact")
+        name, args = parse_slash_command("/compact")
         assert name == "compact"
         assert args == {}
 
     def test_command_with_value(self):
-        name, args = AcpClient._parse_slash_command("/agent planner")
+        name, args = parse_slash_command("/agent planner")
         assert name == "agent"
         assert args == {"value": "planner"}
 
     def test_command_with_multi_word_value(self):
-        name, args = AcpClient._parse_slash_command("/usage detailed view")
+        name, args = parse_slash_command("/usage detailed view")
         assert name == "usage"
         assert args == {"value": "detailed view"}
 

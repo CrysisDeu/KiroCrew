@@ -719,6 +719,55 @@ def _is_tool_interrupted_marker(chunk: str) -> bool:
     return chunk.strip() == _TOOL_INTERRUPTED_MARKER
 
 
+def format_command_result(result: dict) -> str:
+    """Extract displayable text from a commands/execute response.
+
+    Module-level (not a method) because both native slash-command paths need
+    it: AcpClient.stream_command (direct-spawn sessions) and
+    AcpSessionHandle.stream_command (shared-runtime sessions).
+
+    The output is two-pass redacted (URLs + credentials) HERE, in the shared
+    helper, so every present and future caller inherits the security control
+    (command output is backend-echoed text that reaches the dashboard) instead
+    of each call site re-discovering it. Call-site re-redaction stays
+    harmless — both passes are idempotent.
+    """
+    data = result.get("data")
+    message = result.get("message", "")
+    text = ""
+    # Structured data — format as readable JSON block
+    if isinstance(data, dict) and data:
+        # Filter out agent/model metadata (handled separately)
+        display = {k: v for k, v in data.items() if k not in ("agent", "model")}
+        if display:
+            block = json.dumps(display, indent=2)
+            text = (
+                f"{message}\n```json\n{block}\n```"
+                if message
+                else f"```json\n{block}\n```"
+            )
+    if not text:
+        text = message or ""
+    if text:
+        text, _ = redact_exfiltration_urls(text)
+        text, _ = redact_credentials(text)
+    return text
+
+
+def parse_slash_command(command: str) -> tuple[str, dict]:
+    """Parse ``/foo bar baz`` into TuiCommand ``(name, args)``.
+
+    Shared by AcpClient.stream_command and AcpSessionHandle.stream_command —
+    both send the OBJECT form (``{command, args}``) because kiro-cli 2.14.0
+    returns no response on the string form of ``_kiro.dev/commands/execute``.
+    """
+    parts = command.strip().split(None, 1)
+    name = parts[0].lstrip("/") if parts else command.lstrip("/")
+    value = parts[1] if len(parts) > 1 else None
+    args: dict = {"value": value} if value else {}
+    return name, args
+
+
 # Timeouts for session initialization steps
 _INIT_TIMEOUT = 240.0  # 4 min — MCP servers can be slow to initialize
 # set_mode/set_model: fire-and-forget.  kiro-cli accepts these commands
@@ -4256,7 +4305,7 @@ class AcpClient:
                 if extract_agent_from_result and isinstance(result, dict):
                     # commands/execute returns output in result fields,
                     # not via session/update chunks — yield as text.
-                    text = self._format_command_result(result)
+                    text = format_command_result(result)
                     if text:
                         yield AcpEvent(kind=EVENT_TEXT_CHUNK, text=text)
                     if not saw_agent_switch:
@@ -4620,7 +4669,7 @@ class AcpClient:
         self._cancelled = False
         await self.ensure_ready()
 
-        cmd_name, cmd_args = self._parse_slash_command(command)
+        cmd_name, cmd_args = parse_slash_command(command)
         req_id = await self._send_request(
             METHOD_COMMANDS_EXECUTE,
             {
@@ -4630,34 +4679,6 @@ class AcpClient:
         )
         async for event in self._dispatch_events(req_id, timeout, extract_agent_from_result=True):
             yield event
-
-    @staticmethod
-    def _format_command_result(result: dict) -> str:
-        """Extract displayable text from a commands/execute response."""
-        import json as _json
-
-        data = result.get("data")
-        message = result.get("message", "")
-        # Structured data — format as readable JSON block
-        if isinstance(data, dict) and data:
-            # Filter out agent/model metadata (handled separately)
-            display = {k: v for k, v in data.items() if k not in ("agent", "model")}
-            if display:
-                return (
-                    f"{message}\n```json\n{_json.dumps(display, indent=2)}\n```"
-                    if message
-                    else f"```json\n{_json.dumps(display, indent=2)}\n```"
-                )
-        return message or ""
-
-    @staticmethod
-    def _parse_slash_command(command: str) -> tuple[str, dict]:
-        """Parse ``/foo bar baz`` into TuiCommand ``(name, args)``."""
-        parts = command.strip().split(None, 1)
-        name = parts[0].lstrip("/") if parts else command.lstrip("/")
-        value = parts[1] if len(parts) > 1 else None
-        args: dict = {"value": value} if value else {}
-        return name, args
 
     async def cancel_session(self, grace_secs: float = 0.0) -> None:
         """Cancel the current in-flight operation via ACP session/cancel.
