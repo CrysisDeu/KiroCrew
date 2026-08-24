@@ -44,6 +44,11 @@ from kiro_crew.embeddings import (
 )
 from kiro_crew.env import activate_mise
 from kiro_crew.frontend import build_frontend_sync, ensure_dev_dist_symlink
+from kiro_crew.git_divergence import (
+    UNREADABLE_UNPARSEABLE,
+    DivergenceUnreadable,
+    count_divergence_sync,
+)
 from kiro_crew.history import ConversationLog, HistoryConsolidator
 from kiro_crew.hooks import HookManager, hooks_config_from_config_dict
 from kiro_crew.instances import run_marker
@@ -1102,26 +1107,16 @@ def _update(force: bool = False) -> None:
         * ``"diverged"`` — ahead AND behind; resettable only under ``--force``.
         * ``"fast_forward"`` — behind and not ahead; nothing of its own to lose.
         """
-        result = subprocess.run(
-            ["git", "rev-list", "--count", "--left-right", f"HEAD...origin/{branch}"],
-            cwd=proj,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            print(f"  ❌ Could not compare HEAD against origin/{branch}:")
-            print(f"     {result.stderr.strip() or result.stdout.strip()}")
+        counts = count_divergence_sync(proj, f"origin/{branch}")
+        if isinstance(counts, DivergenceUnreadable):
+            if counts.reason == UNREADABLE_UNPARSEABLE:
+                print(f"  ❌ Could not parse the commit counts against origin/{branch}:")
+                print(f"     {counts.detail!r}")
+            else:
+                print(f"  ❌ Could not compare HEAD against origin/{branch}:")
+                print(f"     {counts.detail}")
             return "unreadable", -1, -1
-        # ``--left-right`` with the three-dot range prints "<ahead>\t<behind>":
-        # left is reachable from HEAD only, right from origin/<branch> only.
-        try:
-            ahead_text, behind_text = result.stdout.split()
-            ahead, behind = int(ahead_text), int(behind_text)
-        except ValueError:
-            print(f"  ❌ Could not parse the commit counts against origin/{branch}:")
-            print(f"     {result.stdout.strip()!r}")
-            return "unreadable", -1, -1
+        ahead, behind = counts.ahead, counts.behind
         if behind == 0:
             return "up_to_date", ahead, behind
         if ahead > 0:

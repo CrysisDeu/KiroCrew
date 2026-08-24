@@ -804,15 +804,8 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "cli_server.py::_logs_cmd",
         "cli_server.py::_spawn_detached_gateway",
         "cli_server.py::_update",
-        # Nested helper inside ``_update``, keyed separately because the audit
-        # keys by function name. Same class as its enclosing function, already
-        # allowlisted above: a read-only ``git rev-list --count --left-right
-        # HEAD...origin/<branch>`` on the install's own checkout, run on the
-        # one-shot ``kirocrew update`` path. Fixed argv with no shell; the only
-        # interpolated value is the branch name ``git rev-parse --abbrev-ref
-        # HEAD`` just reported, and it sits after the ``origin/`` prefix so it
-        # cannot become an option. Nothing agent-supplied, nothing written.
-        "cli_server.py::_divergence_verdict",
+        # (_divergence_verdict removed — its counting now delegates to the
+        # git_divergence module, allowlisted below, and spawns nothing itself.)
         "cli_server.py::_update_wheel",
         "cli_setup.py::_setup_electron",
         # Cursor Motion overlay renderer: `<this interpreter> -m
@@ -943,6 +936,20 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "frontend.py::_npm_build_and_stage_locked",
         "frontend.py::build_frontend_async",
         "frontend.py::build_frontend_sync",
+        # The shared ahead/behind divergence count: a read-only ``git rev-list
+        # --count --left-right HEAD...<upstream>`` fixed list-argv (no shell)
+        # run against the install's own checkout. Callers pass the repo path
+        # (KIROCREW_PROJECT_DIR, an operator environment value) and the
+        # upstream spelling — a literal ``@{u}`` or ``origin/<branch>`` where
+        # <branch> is git's own ``rev-parse --abbrev-ref HEAD`` output sitting
+        # after the ``origin/`` prefix so it cannot become an option. Nothing
+        # agent-supplied, nothing written; same trust profile as the update
+        # surfaces it serves (``_check_git_checkout`` / ``api_update_apply`` /
+        # ``_update`` above). The papyrus status caller does NOT spawn through
+        # these: it reuses only the argv/parse primitives and keeps its own
+        # sandbox-routed runner.
+        "git_divergence.py::count_divergence",
+        "git_divergence.py::count_divergence_sync",
         "instances/diagnostics.py::_run_ok",
         "instances/diagnostics.py::_run_stdout",
         "instances/ssh_tunnel_manager.py::start",
