@@ -161,9 +161,12 @@ from kiro_crew.history import ConversationLog, HistoryConsolidator
 from kiro_crew.hooks import HookManager, HooksConfig, hooks_config_from_config_dict
 from kiro_crew.learn import LessonStore
 from kiro_crew.llm_helpers import (
+    TURN_FALLBACK_ATTR,
     PromptBusyExhaustedError,
     ToolApprovalPolicy,
     acp_error_is_transient,
+    configured_fallback_chain,
+    provider_fallback_active,
     provider_last_turn_usage,
     save_conversation_turn_off_loop,
     stream_and_collect,
@@ -1074,6 +1077,34 @@ def _vet_at_claim_then(
             "payload refused rather than run beside the next fire"
         )
     return fn(*args)
+
+
+def _annotate_model_fallback(text: str, provider: Any) -> str:
+    """Prepend the throttle-fallback warning to a delivered unattended result.
+
+    Unattended surfaces (cron/heartbeat) have no chat card to announce a
+    fallback swap on, so the delivered result text itself carries the warning —
+    the same visibility contract as the interactive notice card, and the same
+    pattern as the acquire-time ``_annotate_model_downgrade``. The marker is
+    read from :data:`TURN_FALLBACK_ATTR` (set by ``stream_and_collect``'s
+    fallback walk) and left in place: the swap is sticky for the session, so
+    every run served by the fallback repeats the warning until the restore
+    probe moves the session back. Model ids come from config, which is
+    LLM-reachable via MCP — redact before they reach Slack/dashboard.
+    """
+    fb = getattr(provider, TURN_FALLBACK_ATTR, None)
+    if not fb:
+        return text
+    try:
+        primary, candidate = fb
+    except Exception:
+        return text
+    safe_primary = redact_credentials(redact_exfiltration_urls(str(primary))[0])[0]
+    safe_candidate = redact_credentials(redact_exfiltration_urls(str(candidate))[0])[0]
+    return (
+        f"⚠️ Model '{safe_primary}' throttled; this run was served by fallback "
+        f"'{safe_candidate}'.\n\n" + text
+    )
 
 
 async def _cron_stream_with_posttoken_resume(
@@ -4129,9 +4160,11 @@ class GatewayOrchestrator:
                                 else self._interactive_approval("cron")
                             ),
                             on_tool_gate=_gate.note,
+                            fallback_models=configured_fallback_chain(),
                         )
                         if not result_text:
                             result_text = "_No response._"
+                        result_text = _annotate_model_fallback(result_text, client)
                         logger.info("Cron '%s': agent '%s' completed", job.name, agent)
 
                         # ── Per-turn usage row: background spend. ──
@@ -4151,7 +4184,11 @@ class GatewayOrchestrator:
                                 # requested id would attribute spend to a model
                                 # that never executed. Blank defers to
                                 # model_source, which reports what actually ran.
-                                "" if _seq_downgraded else (job.model or ""),
+                                (
+                                    ""
+                                    if (_seq_downgraded or provider_fallback_active(client))
+                                    else (job.model or "")
+                                ),
                                 _turn_usage,
                                 provider=(
                                     self._cfg.agent.provider if hasattr(self, "_cfg") else "acp"
@@ -4262,6 +4299,7 @@ class GatewayOrchestrator:
                         None if job.approval_mode == "auto" else self._interactive_approval("cron")
                     ),
                     on_tool_gate=_gate.note,
+                    fallback_models=configured_fallback_chain(),
                 )
 
                 if not result_text:
@@ -4269,6 +4307,7 @@ class GatewayOrchestrator:
 
                 if _model_downgraded:
                     result_text = _annotate_model_downgrade(result_text)
+                result_text = _annotate_model_fallback(result_text, client)
 
                 job.set_run_result(result_text)
 
@@ -4291,8 +4330,13 @@ class GatewayOrchestrator:
                         _turn_usage.credits += _carried_credits
                     await persist_token_record_async(
                         session_key,
-                        # Blank on a downgrade — see the sequential site above.
-                        "" if _model_downgraded else (job.model or ""),
+                        # Blank on a downgrade or an active fallback — see the
+                        # sequential site above / provider_fallback_active.
+                        (
+                            ""
+                            if (_model_downgraded or provider_fallback_active(client))
+                            else (job.model or "")
+                        ),
                         _turn_usage,
                         provider=_provider,
                         surface="cron",
@@ -4975,12 +5019,14 @@ class GatewayOrchestrator:
                         approval_policy=ToolApprovalPolicy.HOOK_BASED,
                         hooks=heartbeat_hooks,
                         on_tool_approval=self._heartbeat_approval,
+                        fallback_models=configured_fallback_chain(),
                     ),
                     timeout=HEARTBEAT_TASK_TIMEOUT_SECS,
                 )
 
                 if not result_text:
                     result_text = "_No response._"
+                result_text = _annotate_model_fallback(result_text, client)
 
                 # ── Per-turn usage row: attribute heartbeat spend. ──
                 await _persist_turn_row(

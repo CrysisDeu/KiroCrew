@@ -2505,9 +2505,7 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
     if denied is not None:
         return denied
     force = request.query.get("force", "").lower() == "true"
-    return web.json_response(
-        await stop_slot_turn(state, slot, force=force, cancel_key=cancel_key)
-    )
+    return web.json_response(await stop_slot_turn(state, slot, force=force, cancel_key=cancel_key))
 
 
 async def api_chat_slot_continue(request: web.Request) -> web.Response:
@@ -3906,11 +3904,23 @@ async def api_chat_slot_model(request: web.Request) -> web.Response:
         logger.warning("Slot %s model rejected: %s", name, reason)
         return web.json_response({"error": reason}, status=400)
     if slot.model == model_name:
+        # Same-value pick: nothing to switch, but the user's EXPLICIT
+        # affirmation of this model must still be recorded — the fallback
+        # restore probe reads the pick generation, and without the bump a user
+        # who deliberately picks the very model the session fell back to (or
+        # that the backfill wrote) would have their choice silently overridden
+        # by the next restore probe.
+        slot._model_pick_gen += 1
         return web.json_response({"ok": True, "model": model_name})
     session_key = _history_key_for(name)
     provider = state.sessions.get_provider(session_key)
     prior_model = slot.model
+    prior_pick_gen = slot._model_pick_gen
     slot.model = model_name
+    # Explicit user pick: bump the pick generation so the model-fallback
+    # restore probe never overrides this choice (automatic backfill does NOT
+    # bump it).
+    slot._model_pick_gen += 1
     try:
         went_live = await _try_live_model_switch(name, slot, provider, model_name)
     except AcpModelUnavailable as exc:
@@ -3920,7 +3930,13 @@ async def api_chat_slot_model(request: web.Request) -> web.Response:
         # destroy the conversation and cold-start on a different model while
         # reporting success. Only the session that owns the advertised list gets
         # to make this call, so there is no pre-emptive gate here to go stale.
+        # The pick generation rolls back WITH the model: a refused pick changed
+        # nothing, and leaving the bump in place would make the fallback
+        # restore probe read it as an explicit choice and silently abandon
+        # restoring the primary — the session would stay on the fallback with
+        # no card and no probe.
         slot.model = prior_model
+        slot._model_pick_gen = prior_pick_gen
         logger.warning("Slot %s model rejected: %s", name, exc)
         return web.json_response({"error": str(exc), "code": "model_unavailable"}, status=400)
     if went_live:
@@ -3999,6 +4015,8 @@ async def api_chat_slots_model(request: web.Request) -> web.Response:
             failed.append(name)
             continue
         slot.model = model_name
+        # Explicit pick (bulk): same generation bump as the single-slot pick.
+        slot._model_pick_gen += 1
         _broadcast_context_reset(state, slot.key, None)
         switched.append(name)
 

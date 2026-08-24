@@ -1714,6 +1714,17 @@ _EDITABLE_CONFIG: dict[str, dict] = {
         "pattern": r"^[A-Za-z0-9._\-\[\]]*$",
         "validate_fn": _validate_role_model,
     },
+    # Throttle-exhaustion fallback model. Single value: "auto" (default) defers
+    # to the backend's availability-aware routing; a concrete id is tried first
+    # with "auto" as the final fallthrough; "" disables the feature. Same
+    # grammar + entitlement validation as the role-model pins ("" / "auto"
+    # always allow), so the dropdown and the wire cannot disagree.
+    "agent.fallback_model": {
+        "type": "str",
+        "max_len": 64,
+        "pattern": r"^[A-Za-z0-9._\-\[\]]*$",
+        "validate_fn": _validate_role_model,
+    },
     "agent.reasoning_effort": {"type": "enum", "values": ["", *EFFORT_LEVELS]},
     # Per-role reasoning effort, paired with role_models. Same enum as the chat
     # default; "" = inherit. Applies only on reasoning-capable models.
@@ -2159,6 +2170,10 @@ async def api_kirocrew_config_patch(request: web.Request) -> web.Response:
         for slot in state._slots.values():
             if slot.model:
                 slot.model = ""
+                # Deliberate model change: bump the pick generation so the
+                # fallback restore probe drops any sticky state instead of
+                # restoring a model id from the previous provider.
+                slot._model_pick_gen += 1
         state.push_slots_update()
         logger.info(
             "Provider switched to %s — config rebuilt, factory reloaded, slot models cleared", value

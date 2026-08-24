@@ -4188,7 +4188,14 @@
         "summarize_each_session_by_intent_in_the_right_pa": "Summarize each session by intent. Uses tokens on turns that change the session.",
         "failed_to_save_session_summaries": "Failed to save session summaries setting",
         "role_model_auto": "Auto (provider picks)",
-        "effort_needs_reasoning_model": "Applies only on reasoning-capable models, so it has no effect on the model selected above."
+        "effort_needs_reasoning_model": "Applies only on reasoning-capable models, so it has no effect on the model selected above.",
+        "throttle_fallback": "Rate-limit fallback",
+        "fallback_model": "Fallback model",
+        "model_tried_when_your_current_model_stays_rate_li": "Model tried when your current model stays rate-limited past its retry budget.",
+        "fallback_auto_hint": "Auto (default) lets the backend route to an available model. A fallback swap is announced in chat and sticks until your model recovers. Disabled turns fallback off.",
+        "fallback_disabled": "Disabled",
+        "fallback_auto": "Auto (recommended)",
+        "failed_to_save_fallback_model": "Failed to save fallback model"
       },
       "displayPanel": {
         "color": "Color {{n}}",

@@ -540,6 +540,15 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1
   },
   {
+    "id": "chat.fallback-model",
+    "label": "Fallback model",
+    "labelKey": "pages.settings.chatPanel.fallback_model",
+    "tab": "chat",
+    "type": "select",
+    "occurrence": 1,
+    "configKey": "agent.fallback_model"
+  },
+  {
     "id": "chat.feature-tips",
     "label": "Feature Tips",
     "labelKey": "pages.settings.chatPanel.feature_tips",

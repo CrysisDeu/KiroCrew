@@ -173,9 +173,16 @@ from kiro_crew.hooks import (
 from kiro_crew.image_artifacts import register_images_off_loop
 from kiro_crew.llm_helpers import (
     TRANSIENT_RETRIES,
+    TURN_FALLBACK_ATTR,
+    FallbackState,
     PromptBusyExhaustedError,
     acp_error_is_transient,
+    advance_fallback_candidate,
+    configured_fallback_chain,
+    provider_active_model,
+    provider_raw_model,
     record_interaction_event,
+    resolve_substitute_set_model,
     run_bg_oneliner,
     transient_retry_delay,
 )
@@ -772,6 +779,155 @@ def _pinned_model_withheld(client: Any, model: str, provider: str) -> bool:
     except Exception:
         return False
     return model_is_unusable(model, advertised)
+
+
+def _agent_fallback_chain() -> tuple[str, ...]:
+    """The configured throttle-fallback chain (agent.fallback_model), or ``()``.
+
+    Thin wrapper over :func:`llm_helpers.configured_fallback_chain`, kept as a
+    module-level seam so tests can pin the chain without a config file. This
+    only runs on the (rare) budget-exhausted error path, and ``cfg`` bound
+    earlier in the turn is possibly-undefined when the config was malformed.
+    ``()`` (unset or unreadable) disables the feature: the terminal error
+    branch then behaves byte-for-byte as before this feature existed.
+    """
+    return configured_fallback_chain()
+
+
+async def _fallback_swap_for_turn(slot: Any, client: Any) -> str | None:
+    """Move the slot's live session onto the next usable fallback candidate.
+
+    Called from the interactive error ladder once the same-model transient
+    budget is exhausted. Thin slot-state adapter over the SHARED walk step
+    (:func:`llm_helpers.advance_fallback_candidate` — the same body the
+    unattended surfaces use, so skip rules and marker semantics cannot
+    diverge): reconstructs a :class:`FallbackState` from the slot's per-cycle
+    walk position, advances one step, and writes the position plus the sticky
+    dashboard state back. Returns the candidate id, or ``None`` when the chain
+    is exhausted / unconfigured / unusable — the caller then falls through to
+    the terminal error branch exactly as today.
+    """
+    chain = _agent_fallback_chain()
+    if not chain:
+        return None
+    fb_state = FallbackState(
+        chain,
+        pos=max(0, int(slot._fallback_candidate_idx or 0)),
+        primary=slot._fallback_primary_model or "",
+    )
+    candidate = await advance_fallback_candidate(
+        client, fb_state, surface="dashboard", log_suffix=f", slot={slot.key}"
+    )
+    slot._fallback_candidate_idx = fb_state.pos
+    if candidate is None:
+        return None
+    if not slot._fallback_primary_model:
+        slot._fallback_primary_model = fb_state.primary
+        # Snapshot slot.model and the explicit-pick generation at activation.
+        # The generation is what tells a LATER genuine user pick (drop sticky
+        # state, never override) apart from the automatic provider backfill
+        # writing the served fallback into an unpinned slot (heal and
+        # restore); the slot-model snapshot is what the heal restores.
+        slot._fallback_slot_model = slot.model or ""
+        slot._fallback_pick_gen = slot._model_pick_gen
+    slot._active_fallback_model = candidate
+    slot._fallback_walked.append(candidate)
+    return candidate
+
+
+async def _probe_fallback_restore_for_slot(slot: Any, client: Any) -> None:
+    """Start-of-turn restore probe: one ``set_model(primary)`` attempt.
+
+    Fires only while a fallback is active (``slot._active_fallback_model``).
+    Restores only when the session is still on the fallback this feature set —
+    a user's explicit later pick or a session reset clears the sticky state
+    without touching the model. Success is quiet in chat (log only): the
+    primary's recovery is the expected state; degradation is the loud event.
+    Never raises.
+    """
+    candidate = slot._active_fallback_model
+    if not candidate:
+        return
+    primary = slot._fallback_primary_model
+    current = provider_active_model(client)
+    _moved_off = current and current.strip().lower() != candidate.strip().lower()
+    # An explicit user pick made AFTER the swap bumps the pick generation —
+    # including a pick of the fallback model itself, which neither the served
+    # model nor slot.model can distinguish from our own swap (the automatic
+    # provider backfill also writes the served fallback into an unpinned
+    # slot's model, so comparing slot.model VALUES would misread the backfill
+    # as a pick and permanently abandon restoration). An explicit pick must
+    # never be overridden by a restore.
+    _user_repicked = slot._model_pick_gen != slot._fallback_pick_gen
+    if _moved_off or _user_repicked or not primary:
+        # Session moved off our fallback by other means (explicit pick, reset)
+        # or the primary was never known — the sticky state is stale.
+        _clear_fallback_sticky_state(slot, client)
+        return
+    set_model_fn = resolve_substitute_set_model(client)
+    if set_model_fn is None:
+        return
+    try:
+        await set_model_fn(primary)
+    except Exception as exc:
+        logger.info(
+            "model fallback: primary %s still unavailable on slot %s (%s); staying on %s",
+            primary,
+            slot.key,
+            exc,
+            candidate,
+        )
+        return
+    # Witness the restore before heal+clear (same check as
+    # llm_helpers.probe_fallback_restore): a non-raising set_model(primary)
+    # can be a silent no-op when resolve collapses the target to "". Clearing
+    # sticky state while still ON the fallback re-opens the backfill
+    # permanent-pin door this state exists to close. Keep everything and
+    # retry at the next genuine turn start.
+    _raw = provider_raw_model(client)
+    if _raw and candidate and _raw.strip().lower() == str(candidate).strip().lower():
+        logger.info(
+            "model fallback: restore to %s was a silent no-op on slot %s (still on %s); "
+            "keeping fallback",
+            primary,
+            slot.key,
+            candidate,
+        )
+        return
+    # Heal slot.model if the automatic backfill wrote the fallback into an
+    # unpinned slot while the fallback was active: slot.model is re-sent as a
+    # set_model override on resume, so leaving the fallback id there would
+    # re-pin the fallback after the primary recovered. No explicit pick
+    # happened (checked above), so the snapshot is the honest value.
+    if (slot.model or "") != slot._fallback_slot_model:
+        slot.model = slot._fallback_slot_model
+    _clear_fallback_sticky_state(slot, client)
+    logger.warning(
+        "model fallback: restored %s -> %s (reason=primary-recovered, surface=dashboard, slot=%s)",
+        candidate,
+        primary,
+        slot.key,
+    )
+
+
+def _clear_fallback_sticky_state(slot: Any, client: Any) -> None:
+    """Drop ALL sticky fallback state — slot fields AND the provider marker.
+
+    The provider-side :data:`TURN_FALLBACK_ATTR` marker is cleared together
+    with the slot fields, always: the two are one logical record, and a marker
+    that outlives the slot state re-seeds a long-dead primary into a LATER,
+    unrelated fallback walk (the marker-first primary seeding in
+    ``advance_fallback_candidate`` would then "restore" a model the user
+    explicitly moved away from).
+    """
+    slot._active_fallback_model = ""
+    slot._fallback_primary_model = ""
+    slot._fallback_slot_model = ""
+    try:
+        if getattr(client, TURN_FALLBACK_ATTR, None) is not None:
+            setattr(client, TURN_FALLBACK_ATTR, None)
+    except Exception:
+        logger.debug("clearing fallback marker failed", exc_info=True)
 
 
 def _context_usage_payload(slot_key: str, client: Any) -> dict[str, Any]:
@@ -5194,7 +5350,15 @@ async def _run_chat(
         # provider so a kiro/acp dotted id (which collides with a claude_code
         # alias spelling) is left as-is.
         withheld_pin = False
-        if not slot.model:
+        if not slot.model and not slot._active_fallback_model:
+            # The fallback-active guard is load-bearing: while a throttle
+            # fallback is serving this session, the provider's resolved model
+            # IS the fallback candidate, and slot.model is PERSISTED — writing
+            # the candidate here would outlive the in-memory sticky state
+            # across a gateway restart and turn a temporary fallback into a
+            # permanent pin. An unpinned slot simply stays unpinned for the
+            # fallback's duration; the next non-fallback turn backfills as
+            # before.
             slot.model = _backfill_canonical_model(client, provider_name) or slot.model
         elif (is_new or resumed) and _pinned_model_withheld(client, slot.model, provider_name):
             withheld_pin = True
@@ -5706,6 +5870,23 @@ async def _run_chat(
                     ),
                 },
             )
+
+        # ── Model-fallback restore probe (agent.fallback_model) ──
+        # A prior turn's throttle fallback is sticky for the session; at the
+        # start of each GENUINE user turn try once to move back to the primary.
+        # Quiet on success — recovery is the expected state (log only, no chat
+        # card); a still-throttled primary keeps the fallback for this turn.
+        # Two guards keep the probe off recovery turns: a mid-cycle fallback
+        # replay arrives with a non-zero `_fallback_candidate_idx` (the walk
+        # state resets only when the cycle lands or terminates), and a
+        # post-token CONTINUE replay is a runner-authored continuation of an
+        # interrupted turn — restoring there would swap the model mid-answer.
+        if (
+            slot._active_fallback_model
+            and slot._fallback_candidate_idx == 0
+            and message not in _SYNTHETIC_RECOVERY_MSGS
+        ):
+            await _probe_fallback_restore_for_slot(slot, client)
 
         event_stream = client.stream_command(message) if is_slash else client.stream(full_message)
         state.broadcast_ws("chat_status", {"slot": slot.key, "status": "Thinking…"})
@@ -7469,13 +7650,21 @@ async def _run_chat(
                     # slot.model may still be empty here even though the
                     # provider learned the model mid-turn. Read it back
                     # before persisting so tokens.jsonl is never tagged
-                    # with a blank model for CC sessions.
+                    # with a blank model for CC sessions. Skipped while a
+                    # fallback is active (same guard as the pre-turn site):
+                    # the provider reports the FALLBACK, and writing it into
+                    # slot.model would make the temporary swap a permanent pin.
                     _record_model = slot.model
-                    if not _record_model:
+                    if not _record_model and not slot._active_fallback_model:
                         _canonical = _backfill_canonical_model(client, _provider_name)
                         if _canonical:
                             slot.model = _canonical
                             _record_model = _canonical
+                    if slot._active_fallback_model:
+                        # Blank while a fallback serves the turn: the pin would
+                        # bill the fallback's spend to a model that never
+                        # executed; model_source reports what actually ran.
+                        _record_model = ""
                     # Read context-window occupancy off the same `client`
                     # used above (mirrors _context_usage_payload's accessor
                     # pattern); read_context_tokens never raises.
@@ -8193,6 +8382,12 @@ async def _run_chat(
             slot._stale_recovery_exhausted_emitted = False
             slot._tool_stall_exhausted_emitted = False
             slot._transient_5xx_retries = 0
+            # Per-cycle fallback-chain walk state resets with the budgets; the
+            # sticky _active_fallback_model / _fallback_primary_model pair
+            # deliberately survives a landed turn — the session stays on the
+            # fallback until the start-of-turn restore probe succeeds.
+            slot._fallback_candidate_idx = 0
+            slot._fallback_walked = []
             # Reset the promise-only one-shot on a LANDED turn so the guard re-arms
             # per user turn (matching state.py's contract and the sibling budgets).
             # Without this a single false positive would disarm it for the slot's
@@ -8746,6 +8941,65 @@ async def _run_chat(
                 # depth>0 (nested turn): don't re-queue — surface a clean
                 # transient status; the live session stays resumable.
                 slot.append("error", "⟳ Backend hiccup — please retry.", "msg msg-err")
+        elif (
+            not _turn_emitted
+            and acp_error_is_transient(exc)
+            and slot._transient_5xx_retries >= TRANSIENT_RETRIES
+            and _prompt_depth == 0
+            and not _should_suppress_requeue(slot)
+            and (_fb_candidate := await _fallback_swap_for_turn(slot, client)) is not None
+        ):
+            # ── Throttle-exhaustion model fallback (agent.fallback_model) ──
+            # The same-model budget above is spent and the error is still
+            # transient (throttle/capacity). _fallback_swap_for_turn already
+            # moved the live session onto `_fb_candidate` via the substitute
+            # set_model path (and returned None — falling through to the
+            # terminal branch exactly as today — when the chain is empty,
+            # exhausted, or unusable). Announce the swap visibly (never
+            # silent: the user picked the primary, so running elsewhere must
+            # be said out loud), then re-queue the SAME message on the SAME
+            # live session, exactly like the same-model retry above.
+            #
+            # Attempt budget: rewinding the counter to TRANSIENT_RETRIES - 1
+            # grants the candidate exactly ONE more pass through the
+            # same-model branch above, so each candidate gets two attempts
+            # (this re-queued one + one retry) before the next exhaustion
+            # lands back here and advances the chain — see
+            # llm_helpers.FALLBACK_CANDIDATE_ATTEMPTS for why not a full
+            # fresh budget. Nested turns (_prompt_depth > 0) get no fallback
+            # in v1 and Stop-suppressed cycles never swap (both guarded in
+            # the condition before the side-effecting swap runs).
+            slot.purge_chunks()
+            _fb_primary_safe, _ = redact_exfiltration_urls(
+                slot._fallback_primary_model or "the selected model"
+            )
+            _fb_primary_safe, _ = redact_credentials(_fb_primary_safe)
+            _fb_cand_safe, _ = redact_exfiltration_urls(_fb_candidate)
+            _fb_cand_safe, _ = redact_credentials(_fb_cand_safe)
+            # Persisted notice card (withheld-pin pattern): the explanation has
+            # to survive a reload because the state it explains does (the
+            # session stays on the fallback until the restore probe succeeds).
+            slot.append(
+                "notice",
+                f"⚠️ {_fb_primary_safe} is throttled — running on {_fb_cand_safe} "
+                f"until {_fb_primary_safe} recovers.",
+                "msg msg-info",
+            )
+            logger.info(
+                "Re-queuing slot %s on fallback model %s (candidate %d of chain)",
+                slot.key,
+                _fb_candidate,
+                slot._fallback_candidate_idx,
+            )
+            slot._transient_5xx_retries = TRANSIENT_RETRIES - 1
+            await asyncio.sleep(transient_retry_delay(1))
+            slot.queue_insert(
+                0,
+                message,
+                kind=SYNTHETIC_RECOVERY_KIND,
+                # Verbatim replay, same rule as the same-model retry above.
+                payload=payload_for_replay(_is_synthetic),
+            )
         elif _turn_emitted and acp_error_is_transient(exc) and not slot._posttoken_retry_used:
             # Post-token transient 5xx: assistant tokens and/or tool calls
             # already streamed this turn (_turn_emitted). Rather than fail-fast,
@@ -9006,6 +9260,21 @@ async def _run_chat(
             else:
                 _err_text, _ = redact_exfiltration_urls(str(exc))
                 _err_text, _ = redact_credentials(_err_text)
+                # Fallback-chain story (agent.fallback_model): when this cycle
+                # walked fallback candidates and STILL landed here, the error
+                # card must tell the whole story — the primary throttled AND
+                # every fallback tried was also unavailable — not just the last
+                # candidate's error. Model ids come from config (LLM-reachable
+                # via the MCP config-write path), so they pass the same
+                # redaction as the error text.
+                if slot._fallback_walked:
+                    _fb_story = (
+                        f"{slot._fallback_primary_model or 'The selected model'} throttled; "
+                        f"fallbacks {', '.join(slot._fallback_walked)} also unavailable. "
+                    )
+                    _fb_story, _ = redact_exfiltration_urls(_fb_story)
+                    _fb_story, _ = redact_credentials(_fb_story)
+                    _err_text = _fb_story + _err_text
                 slot.append(
                     "error",
                     f"⏱️ {_err_text}" if "timed out" in _msg else f"❌ {_err_text}",
@@ -9026,6 +9295,12 @@ async def _run_chat(
                 # TRANSIENT_RETRIES. (_posttoken_retry_used needs no counterpart
                 # here: it is already refreshed at genuine-turn start.)
                 slot._transient_5xx_retries = 0
+                # Same terminal-cycle refresh for the fallback-chain walk state
+                # (the sticky _active_fallback_model deliberately survives — the
+                # session really is on the fallback until the restore probe
+                # moves it back).
+                slot._fallback_candidate_idx = 0
+                slot._fallback_walked = []
     except _AppAgentNotLoaded as exc:
         # An app-owned slot whose agent never materialized, even after the
         # self-heal warm. Deliberately terminal: running the default agent here is

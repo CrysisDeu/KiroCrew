@@ -430,7 +430,6 @@ src/kiro_crew/slack/handler.py
 src/kiro_crew/slack/interactions.py
 src/kiro_crew/slack/renderer.py
 src/kiro_crew/slack/sessions_view.py
-src/kiro_crew/subagent.py
 src/kiro_crew/subagent_persistence.py
 src/kiro_crew/subagent_scale.py
 src/kiro_crew/suggestions.py
@@ -698,7 +697,6 @@ test/test_dashboard.py
 test/test_dashboard_approval.py
 test/test_dashboard_approval_window.py
 test/test_dashboard_branding.py
-test/test_dashboard_chat.py
 test/test_dashboard_chat_handlers_coverage.py
 test/test_dashboard_chat_rewind.py
 test/test_dashboard_config_gitlab_hosts.py
