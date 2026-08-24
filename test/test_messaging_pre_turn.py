@@ -237,7 +237,11 @@ class TestPreTurnRatchet:
         # checks (wecom additionally clears attachments there and ingests
         # media before rotating), so folding them into the helper is a
         # behaviour change that needs its own review, not a rider here.
-        exempt = {"telegram", "discord", "teams", "slack", "weixin", "wecom"}
+        # whatsapp has the same shape (its own is_busy/_handle_busy path,
+        # maybe_rotate, and awaiting-compact latch in transport_dispatch.py);
+        # it landed concurrently with this ratchet, so the roster gained a
+        # channel the list did not yet name. Migration tracked in #5456.
+        exempt = {"telegram", "discord", "teams", "slack", "weixin", "wecom", "whatsapp"}
         rostered = {d.channel_type for d in builtin_channel_descriptors()}
         unaccounted = rostered - set(_PRE_TURN_CHANNELS) - exempt
         assert not unaccounted, (
