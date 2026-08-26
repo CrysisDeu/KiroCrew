@@ -620,7 +620,8 @@ bugs:
   installed app, which has no Safari toolbar. Pinch is off because magnifying a
   fixed-height layout whose scrollers are all inner leaves no way to reach the
   topbar and composer it pushes off-screen. The surfaces that need magnifying
-  keep it — the image viewer zooms on its own pinch, code blocks scroll sideways.
+  keep it — the image viewer and the diagram viewer both zoom on their own pinch,
+  the diagram viewer also on a double-tap, and code blocks scroll sideways.
 
 Installing changes nothing about authentication: the app carries the same cookies
 the browser holds, on the same clocks as [Session duration](#session-duration).
