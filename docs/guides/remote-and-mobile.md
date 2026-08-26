@@ -612,9 +612,15 @@ bugs:
   `ServiceWorkerRegistration.showNotification()`. Tracked in
   [issue #2267](https://github.com/kirodotdev/KiroCrew/issues/2267); the Android
   symptom is [issue #1828](https://github.com/kirodotdev/KiroCrew/issues/1828).
-- **Not edge-to-edge.** The shell sets neither `viewport-fit=cover` nor any
-  `env(safe-area-inset-*)` padding, so on a notched device the installed app
-  renders inside the safe area rather than filling the screen.
+- **Pinch zoom is off.** The installed app behaves like an application, not a
+  web page: two-finger pinch and double-tap no longer scale the shell. **To
+  magnify, use the OS Display Zoom setting** (iOS: Settings → Display &
+  Brightness → Display Zoom), which still enlarges everything; in a browser tab
+  Safari's Aa text-size control works too, but it is **not** reachable from the
+  installed app, which has no Safari toolbar. Pinch is off because magnifying a
+  fixed-height layout whose scrollers are all inner leaves no way to reach the
+  topbar and composer it pushes off-screen. The surfaces that need magnifying
+  keep it — the image viewer zooms on its own pinch, code blocks scroll sideways.
 
 Installing changes nothing about authentication: the app carries the same cookies
 the browser holds, on the same clocks as [Session duration](#session-duration).
