@@ -3345,6 +3345,10 @@ export function dispatchLightbox(target: HTMLImageElement): void {
 export function Lightbox() {
   const [state, setState] = useState<LightboxDetail | null>(null)
   const imgRef = useRef<HTMLImageElement>(null)
+  /** The overlay root. Separate from `imgRef` because the transform target is the
+   *  image while the surface a user perceives as "the viewer" is the whole
+   *  backdrop — see the `containRef` note on the pinch hook. */
+  const overlayRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef({ startX: 0, startY: 0, baseX: 0, baseY: 0, moved: 0, active: false, dragging: false })
   const [dragging, setDragging] = useState(false)
   // `suppressClick` makes the click that follows a real gesture a no-op, so a
@@ -3364,6 +3368,17 @@ export function Lightbox() {
     trackPointerDown, trackPointerMove, trackPointerUp, reset: resetZoom,
   } = usePinchZoom({
     targetRef: imgRef,
+    // Claim the gesture anywhere in the overlay, not just over the `<img>`. A
+    // small image leaves most of the full-screen backdrop unclaimed, and a pinch
+    // there would fall through to browser page zoom: the viewer is fit-invariant
+    // so nothing appears to happen, and the user closes it to find the dashboard
+    // behind it at a different zoom with no visible cause.
+    containRef: overlayRef,
+    // Only while an image is open. This component mounts ONCE for the app's
+    // lifetime and returns null when closed, so without this a non-passive
+    // `wheel` listener would sit on `window` forever — making the compositor wait
+    // on main-thread dispatch for every scroll in the app, viewer or not.
+    enabled: state !== null,
     min: LIGHTBOX_ZOOM_MIN,
     max: LIGHTBOX_ZOOM_MAX,
     onPinchStart: () => {
@@ -3574,6 +3589,7 @@ export function Lightbox() {
   const swipeProgress = Math.min(1, Math.max(0, swipeY) / LIGHTBOX_DISMISS_TRAVEL)
   return (
     <Clickable
+      ref={overlayRef}
       className={`fixed inset-0 z-[9999] bg-black/80 flex items-center justify-center overflow-hidden cursor-pointer touch-none ${swiping ? '' : 'transition-colors duration-200'}`}
       // Inline background wins over the class only while a drag is live, so the
       // default (and every non-touch) render keeps the plain bg-black/80 paint.
